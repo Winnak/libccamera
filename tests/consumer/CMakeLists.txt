@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(ccamera_consumer LANGUAGES C)
+find_package(ccamera 0.1 CONFIG REQUIRED)
+add_executable(consumer main.c)
+set_target_properties(consumer PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+target_link_libraries(consumer PRIVATE ccamera::ccamera)

@@ -1,0 +1,26 @@
+# CMake builds and local configuration
+/build*/
+/cmake-build*/
+/compile_commands.json
+/CMakeUserPresets.json
+
+# Editors and Python caches
+/.idea/
+/.vscode/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Captures and diagnostics (keep generated output out of the source tree)
+*.raw
+/*.ppm
+/*.jsonl
+/*.bsta
+/*.log
+/*.rgb
+/*.yuv
+/*.nv12
+/*.pc1
+/*.pc2
+/*.pc3
+/*.bin

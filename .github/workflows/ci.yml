@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: CC0-1.0
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: 2
+  CTEST_PARALLEL_LEVEL: 2
+  CTEST_OUTPUT_ON_FAILURE: 1
+
+jobs:
+  build:
+    name: ${{ matrix.compiler }} / ${{ matrix.linkage }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        linkage: [static, shared]
+        include:
+          - linkage: static
+            shared: 'OFF'
+            build_type: Debug
+          - linkage: shared
+            shared: 'ON'
+            build_type: Release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y cmake ninja-build gcc clang libc6-dev linux-libc-dev python3 pkg-config
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_C_COMPILER=${{ matrix.compiler }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+          -DCMAKE_C_FLAGS=-Werror
+      - name: Build library, examples and tests
+        run: cmake --build build
+      - name: Test (including installed CMake consumer)
+        run: ctest --test-dir build --timeout 120
+      - name: Test installed pkg-config consumer
+        env:
+          CC: ${{ matrix.compiler }}
+        run: |
+          export PKG_CONFIG_PATH="$PWD/build/test-install/lib/pkgconfig:$PWD/build/test-install/lib64/pkgconfig"
+          $CC -std=c17 -Wall -Wextra -Werror tests/consumer/main.c \
+            $(pkg-config --cflags --libs --static ccamera) -o build/pkgconfig-consumer
+          export LD_LIBRARY_PATH="$PWD/build/test-install/lib:$PWD/build/test-install/lib64"
+          ./build/pkgconfig-consumer
+
+  sanitizers:
+    name: Clang / ASan + UBSan + fuzz smoke tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install build tools and sanitizer runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y cmake ninja-build clang libclang-rt-dev linux-libc-dev python3
+      - name: Configure
+        run: >-
+          cmake -S . -B build-sanitizers -G Ninja
+          -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_FLAGS="-Werror -fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCCAMERA_BUILD_FUZZERS=ON
+      - name: Build instrumented library, examples, tests and fuzzers
+        run: cmake --build build-sanitizers
+      - name: Test and run bounded fuzz smoke suite
+        run: ctest --test-dir build-sanitizers --timeout 120
+
+  aarch64:
+    name: AArch64 / compile check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y cmake ninja-build gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Configure for 64-bit Linux on Arm
+        run: >-
+          cmake -S . -B build-aarch64 -G Ninja
+          -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+          -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc
+          -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS=-Werror
+      - name: Cross-build library, examples and tests
+        run: cmake --build build-aarch64

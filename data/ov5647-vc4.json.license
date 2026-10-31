@@ -1,0 +1,5 @@
+SPDX-FileCopyrightText: 2019-2026 Raspberry Pi Ltd
+SPDX-License-Identifier: BSD-2-Clause
+
+OV5647 VC4 calibration from the archived libcamera 0.7.2 reference.
+See LICENSES/BSD-2-Clause.txt for the license text.

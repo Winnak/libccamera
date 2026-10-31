@@ -1,0 +1,196 @@
+cmake_minimum_required(VERSION 3.16)
+project(libccamera VERSION 0.1.0 LANGUAGES C)
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "libccamera currently requires Linux media and V4L2 APIs")
+endif()
+
+option(BUILD_SHARED_LIBS "Build a shared library instead of a static archive" OFF)
+option(CCAMERA_BUILD_EXAMPLES "Build the capture examples" ON)
+option(CCAMERA_BUILD_TESTS "Build hardware-independent tests" ON)
+option(CCAMERA_BUILD_FUZZERS "Build Clang libFuzzer targets with ASan and UBSan" OFF)
+option(CCAMERA_BUILD_DRM_FENCE_TEST "Build the optional real DRM sync-file test" OFF)
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+set(CCAMERA_SOURCES
+    src/io.c src/media.c src/media_topology.c src/controls.c src/stream.c src/camera.c src/vimc.c src/uvc.c src/discovery.c src/capture.c src/request_buffers.c src/fence.c src/delayed_controls.c src/sensor.c src/sensor_timing.c
+    src/ipa.c src/ipa_statistics.c src/ipa_reference.c src/af.c src/embedded.c src/embedded_capture.c src/sensor_streams.c src/frame_interval.c
+    src/vc4_tuning.c src/ipa_vc4.c src/vc4_isp.c src/cfe.c src/cfe_config.c src/pisp_format.c src/pisp_processing.c
+    src/pisp_resize.c src/pisp_tiling.c src/pisp_be_config.c src/pisp_be.c)
+
+function(ccamera_compile_settings target)
+    set_target_properties(${target} PROPERTIES C_STANDARD 17 C_STANDARD_REQUIRED YES C_EXTENSIONS NO)
+    target_compile_definitions(${target} PRIVATE _POSIX_C_SOURCE=200809L _FILE_OFFSET_BITS=64)
+    target_include_directories(${target} PRIVATE ${libccamera_SOURCE_DIR}/src)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+endfunction()
+
+add_library(ccamera ${CCAMERA_SOURCES})
+add_library(ccamera::ccamera ALIAS ccamera)
+ccamera_compile_settings(ccamera)
+target_include_directories(ccamera PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+set_target_properties(ccamera PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 0
+    C_VISIBILITY_PRESET hidden POSITION_INDEPENDENT_CODE YES)
+
+if(CCAMERA_BUILD_EXAMPLES)
+    add_executable(ccamera-still examples/still.c)
+    ccamera_compile_settings(ccamera-still)
+    target_link_libraries(ccamera-still PRIVATE ccamera::ccamera)
+    add_executable(ccamera-capture examples/capture.c)
+    ccamera_compile_settings(ccamera-capture)
+    target_link_libraries(ccamera-capture PRIVATE ccamera::ccamera)
+    add_executable(ccamera-cfe-capture examples/cfe_capture.c)
+    ccamera_compile_settings(ccamera-cfe-capture)
+    target_link_libraries(ccamera-cfe-capture PRIVATE ccamera::ccamera)
+endif()
+
+if(CCAMERA_BUILD_TESTS)
+    enable_testing()
+    # Compile the private syscall seam into tests, without exposing it in the API.
+    add_executable(ccamera-test tests/test_camera.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-test)
+    target_include_directories(ccamera-test PRIVATE include)
+    add_test(NAME camera-lifecycle COMMAND ccamera-test)
+    add_test(NAME cfe-frontend COMMAND ccamera-test cfe)
+    add_test(NAME capture-requests COMMAND ccamera-test requests)
+    add_test(NAME sensor-delays COMMAND ccamera-test delays)
+    add_test(NAME request-sensor-controls COMMAND ccamera-test request-controls)
+    add_test(NAME sensor-defaults COMMAND ccamera-test sensor)
+    add_test(NAME cfe-ipa-feedback COMMAND ccamera-test ipa)
+    add_test(NAME uvc-pipeline COMMAND ccamera-test uvc)
+    add_executable(ccamera-uvc-test tests/test_uvc.c)
+    ccamera_compile_settings(ccamera-uvc-test)
+    target_link_libraries(ccamera-uvc-test PRIVATE ccamera::ccamera)
+    add_test(NAME uvc-controls COMMAND ccamera-uvc-test)
+    add_executable(ccamera-stream-test tests/test_stream.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-stream-test)
+    target_include_directories(ccamera-stream-test PRIVATE include)
+    add_test(NAME stream-lifecycle COMMAND ccamera-stream-test)
+    add_executable(ccamera-interval-test tests/test_frame_interval.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-interval-test)
+    target_include_directories(ccamera-interval-test PRIVATE include)
+    add_test(NAME frame-intervals COMMAND ccamera-interval-test)
+    add_executable(ccamera-vimc-test tests/test_vimc.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-vimc-test)
+    target_include_directories(ccamera-vimc-test PRIVATE include)
+    add_test(NAME vimc-pipeline COMMAND ccamera-vimc-test)
+    add_executable(ccamera-vc4-test tests/test_vc4.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-vc4-test)
+    target_include_directories(ccamera-vc4-test PRIVATE include)
+    add_test(NAME vc4-isp COMMAND ccamera-vc4-test)
+    add_test(NAME pisp-backend COMMAND ccamera-vc4-test pisp)
+    add_test(NAME pipeline-requests COMMAND ccamera-vc4-test requests)
+    add_test(NAME request-image-buffers COMMAND ccamera-vc4-test buffers)
+    add_test(NAME acquire-fences COMMAND ccamera-vc4-test fences)
+    add_test(NAME vc4-ipa-feedback COMMAND ccamera-vc4-test ipa)
+    add_test(NAME cfe-pisp-feedback COMMAND ccamera-vc4-test cfe-be)
+    add_test(NAME sensor-timing-graphs COMMAND ccamera-vc4-test timing)
+    add_test(NAME autofocus-graphs COMMAND ccamera-vc4-test af)
+    add_test(NAME embedded-autofocus-graph COMMAND ccamera-vc4-test embedded)
+    add_test(NAME media-v2-pipeline-graphs COMMAND ccamera-vc4-test topology)
+    add_executable(ccamera-delayed-test tests/test_delayed_controls.c src/delayed_controls.c)
+    ccamera_compile_settings(ccamera-delayed-test)
+    target_include_directories(ccamera-delayed-test PRIVATE include)
+    add_test(NAME delayed-controls COMMAND ccamera-delayed-test)
+    add_executable(ccamera-sensor-test tests/test_sensor.c)
+    ccamera_compile_settings(ccamera-sensor-test)
+    target_link_libraries(ccamera-sensor-test PRIVATE ccamera::ccamera)
+    add_test(NAME sensor-helpers COMMAND ccamera-sensor-test)
+    add_executable(ccamera-embedded-test tests/test_embedded.c)
+    ccamera_compile_settings(ccamera-embedded-test)
+    target_link_libraries(ccamera-embedded-test PRIVATE ccamera::ccamera)
+    add_test(NAME sensor-embedded-data COMMAND ccamera-embedded-test)
+    add_executable(ccamera-sensor-streams-test tests/test_sensor_streams.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-sensor-streams-test)
+    target_include_directories(ccamera-sensor-streams-test PRIVATE include)
+    add_test(NAME sensor-stream-routing COMMAND ccamera-sensor-streams-test)
+    add_executable(ccamera-embedded-capture-test tests/test_embedded_capture.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-embedded-capture-test)
+    target_include_directories(ccamera-embedded-capture-test PRIVATE include)
+    add_test(NAME embedded-capture COMMAND ccamera-embedded-capture-test)
+    add_executable(ccamera-pisp-config-test tests/test_pisp_config.c)
+    ccamera_compile_settings(ccamera-pisp-config-test)
+    target_link_libraries(ccamera-pisp-config-test PRIVATE ccamera::ccamera)
+    add_test(NAME pisp-configuration COMMAND ccamera-pisp-config-test)
+    add_executable(ccamera-pisp-processing-test tests/test_pisp_processing.c)
+    ccamera_compile_settings(ccamera-pisp-processing-test)
+    target_link_libraries(ccamera-pisp-processing-test PRIVATE ccamera::ccamera)
+    add_test(NAME pisp-processing COMMAND ccamera-pisp-processing-test)
+    add_executable(ccamera-vc4-tuning-test tests/test_vc4_tuning.c)
+    ccamera_compile_settings(ccamera-vc4-tuning-test)
+    target_link_libraries(ccamera-vc4-tuning-test PRIVATE ccamera::ccamera)
+    add_test(NAME ov5647-vc4-tuning COMMAND ccamera-vc4-tuning-test)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME sensor-timing-analysis COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_sensor_timing_analysis.py)
+    endif()
+    add_executable(ccamera-ipa-test tests/test_ipa.c)
+    ccamera_compile_settings(ccamera-ipa-test)
+    target_link_libraries(ccamera-ipa-test PRIVATE ccamera::ccamera)
+    add_test(NAME ipa-algorithms COMMAND ccamera-ipa-test)
+    add_executable(ccamera-af-test tests/test_af.c)
+    ccamera_compile_settings(ccamera-af-test)
+    target_link_libraries(ccamera-af-test PRIVATE ccamera::ccamera)
+    add_test(NAME autofocus COMMAND ccamera-af-test)
+    add_executable(ccamera-lens-test tests/test_lens.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-lens-test)
+    target_include_directories(ccamera-lens-test PRIVATE include)
+    add_test(NAME lens-control COMMAND ccamera-lens-test)
+    add_executable(ccamera-media-topology-test tests/test_media_topology.c src/media.c src/media_topology.c src/io.c)
+    ccamera_compile_settings(ccamera-media-topology-test)
+    target_include_directories(ccamera-media-topology-test PRIVATE include)
+    add_test(NAME media-v2-topology COMMAND ccamera-media-topology-test)
+    add_test(NAME installed-consumer COMMAND ${CMAKE_COMMAND}
+        -DCC_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DCC_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        "-DCC_GENERATOR=${CMAKE_GENERATOR}"
+        -DCC_CONFIG=$<CONFIG>
+        -DCC_COMPILER=${CMAKE_C_COMPILER}
+        -DCC_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}
+        -DCC_SYSROOT=${CMAKE_SYSROOT}
+        -DCC_CROSSCOMPILING=${CMAKE_CROSSCOMPILING}
+        "-DCC_EMULATOR=${CMAKE_CROSSCOMPILING_EMULATOR}"
+        "-DCC_C_FLAGS=${CMAKE_C_FLAGS}"
+        "-DCC_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_consumer.cmake)
+endif()
+
+if(CCAMERA_BUILD_FUZZERS)
+    enable_testing()
+    add_subdirectory(tests/fuzz)
+endif()
+
+if(CCAMERA_BUILD_DRM_FENCE_TEST)
+    enable_testing()
+    set(CCAMERA_DRM_RENDER_NODE "/dev/dri/renderD128" CACHE FILEPATH "DRM render node for the native fence test")
+    add_executable(ccamera-native-fence-test tests/native_sync_file.c src/fence.c src/io.c)
+    ccamera_compile_settings(ccamera-native-fence-test)
+    target_link_libraries(ccamera-native-fence-test PRIVATE ccamera::ccamera)
+    add_test(NAME native-sync-file COMMAND ccamera-native-fence-test "${CCAMERA_DRM_RENDER_NODE}")
+    set_tests_properties(native-sync-file PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+install(TARGETS ccamera EXPORT ccameraTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/ccamera DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/ccamera)
+install(DIRECTORY LICENSES/ DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/ccamera
+    FILES_MATCHING PATTERN "*.txt")
+install(EXPORT ccameraTargets NAMESPACE ccamera:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ccamera)
+configure_package_config_file(cmake/ccameraConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/ccameraConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ccamera)
+write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/ccameraConfigVersion.cmake
+    VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ccameraConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/ccameraConfigVersion.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ccamera)
+file(RELATIVE_PATH CCAMERA_PC_PREFIX "${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig" "${CMAKE_INSTALL_PREFIX}")
+configure_file(cmake/ccamera.pc.in ccamera.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ccamera.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)

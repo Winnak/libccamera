@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/@CCAMERA_PC_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: ccamera
+Description: C17 camera capture and Linux media pipeline library
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lccamera
+Cflags: -I${includedir}

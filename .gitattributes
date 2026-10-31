@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Fuzzer seeds contain arbitrary bytes, including files that look like text.
+/tests/fuzz/corpus/** binary
