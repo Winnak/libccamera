@@ -1,6 +1,6 @@
 # libccamera
 
-A C17 rewrite of the [libcamera](https://github.com/raspberrypi/libcamera/) 
+A C17 rewrite of [libcamera](https://github.com/raspberrypi/libcamera/)'s 
 core for Linux, built with CMake, mostly written by AI. Static linking
 is the default, and libc is the only required runtime dependency. The library
 uses Linux media/V4L2 APIs without depending on the upstream C++ library,
