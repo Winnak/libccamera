@@ -16,6 +16,10 @@ static void test_discovery_and_routing(void)
         cc_sensor_mode_request request={.mbus_codes=codes,.num_mbus_codes=2,.width=640,.height=480};
         cc_sensor_format selected; OK(cc_camera_select_sensor_mode(&f.camera,&request,&selected));
         CHECK(selected.mbus_code==codes[0] && selected.width==640 && selected.height==480);
+        cc_rpi_sensor_mode_request rpi_request={.mbus_codes=codes,.num_mbus_codes=2,
+            .width=1280,.height=720,.bit_depth=10};
+        OK(cc_camera_select_rpi_sensor_mode(&f.camera,&rpi_request,&selected));
+        CHECK(selected.mbus_code==codes[1] && selected.width==640 && selected.height==480);
         CHECK(f.size_stream==7 && !f.sensor_sets && !f.receiver_sets && !f.current_sets && !f.old_sets);
         /* TRY and ACTIVE may have different route IDs; TRY cannot change the
          * selected active stream cached by the configured camera. */

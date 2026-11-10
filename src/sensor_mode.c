@@ -3,10 +3,14 @@
  * libcamera 0.7.2 reference, src/libcamera/sensor/camera_sensor_legacy.cpp
  * (Copyright (C) 2019, Google Inc.). Exact integer ratios and 64-bit areas
  * avoid rounding and overflow for large native dimensions. */
+/* Pi scoring follows CameraData::scoreFormat()/findBestFormat() in the same
+ * archive, src/libcamera/pipeline/rpi/common/pipeline_base.cpp
+ * (Copyright (C) 2019-2023, Raspberry Pi Ltd). */
 #include "internal.h"
 #include "subdev_compat.h"
 #include <ccamera/sensor.h>
 #include <errno.h>
+#include <linux/media-bus-format.h>
 
 #define CC_SENSOR_MODE_CODE_LIMIT 256U
 #define CC_SENSOR_MODE_SIZE_LIMIT 4096U
@@ -65,16 +69,57 @@ static int compare_ratio(uint64_t a, uint32_t b, uint64_t c, uint32_t d)
     return x < y ? -1 : x > y ? 1 : 0;
 }
 
-int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request *request,
-                                 cc_sensor_format *out)
+static uint32_t raw_depth(uint32_t code)
+{
+    switch (code) {
+#define DEPTH(bits) \
+    case MEDIA_BUS_FMT_SBGGR##bits##_1X##bits: \
+    case MEDIA_BUS_FMT_SGBRG##bits##_1X##bits: \
+    case MEDIA_BUS_FMT_SGRBG##bits##_1X##bits: \
+    case MEDIA_BUS_FMT_SRGGB##bits##_1X##bits: \
+    case MEDIA_BUS_FMT_Y##bits##_1X##bits: return bits
+    DEPTH(8);
+    DEPTH(10);
+    DEPTH(12);
+    DEPTH(14);
+    DEPTH(16);
+#undef DEPTH
+    default: return 0;
+    }
+}
+
+static double rpi_error(double desired, double actual)
+{
+    double score=desired-actual;
+    if (score < 0.0) score=-score/8;
+    if (actual != desired) score*=2;
+    return score;
+}
+
+static double rpi_score(const cc_sensor_mode_request *request, uint32_t width, uint32_t height,
+                        uint32_t depth, uint32_t desired_depth)
+{
+    double score=rpi_error(request->width,width);
+    score+=rpi_error(request->height,height);
+    score+=1500.0*rpi_error((double)request->width/request->height,(double)width/height);
+    score+=(depth > desired_depth ? depth-desired_depth : desired_depth-depth)*500.0;
+    return score;
+}
+
+/* desired_depth==0 selects the generic policy. Both policies share bounded,
+ * read-only enumeration and publish a result only after every ioctl succeeds. */
+static int select_mode(cc_camera *camera, const cc_sensor_mode_request *request,
+                        uint32_t desired_depth, cc_sensor_format *out)
 {
     if (!camera || !request || !out || !request->mbus_codes || !request->num_mbus_codes ||
         !request->width || !request->height || (!request->max_width != !request->max_height) ||
         (request->max_width && (request->max_width < request->width || request->max_height < request->height)))
         return -EINVAL;
     if (request->num_mbus_codes > CC_SENSOR_MODE_CODE_LIMIT) return -E2BIG;
-    for (size_t i=0; i<request->num_mbus_codes; ++i)
+    for (size_t i=0; i<request->num_mbus_codes; ++i) {
         if (!request->mbus_codes[i]) return -EINVAL;
+        if (desired_depth && !raw_depth(request->mbus_codes[i])) return -ENOTSUP;
+    }
     if (camera->sensor_fd < 0) return -ENOTSUP;
     cc_sensor_streams streams;
     int ret=cc_camera_get_sensor_streams(camera,&streams);
@@ -82,6 +127,7 @@ int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request
 
     cc_sensor_format best={0};
     uint64_t best_ratio=0, best_area=0;
+    double best_score=0.0;
     size_t best_preference=0;
     uint32_t seen[CC_SENSOR_MODE_CODE_LIMIT], total_sizes=0;
     for (uint32_t c=0; ; ++c) {
@@ -104,8 +150,21 @@ int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request
             if (ret < 0) return ret;
             if (total_sizes++ == CC_SENSOR_MODE_SIZE_LIMIT) return -E2BIG;
             uint32_t width=mode.sizes.max_width, height=mode.sizes.max_height;
-            if (width < request->width || height < request->height ||
-                (request->max_width && (width > request->max_width || height > request->max_height))) continue;
+            if (!desired_depth && (width < request->width || height < request->height ||
+                (request->max_width && (width > request->max_width || height > request->max_height)))) continue;
+            if (desired_depth) {
+                double score=rpi_score(request,width,height,raw_depth(code),desired_depth);
+                uint64_t area=(uint64_t)width*height;
+                /* Upstream traverses ascending code and Size order, replacing
+                 * on <=. Resolve ties explicitly to avoid driver-order effects. */
+                if (!best.mbus_code || score < best_score || (score == best_score &&
+                    (code > best.mbus_code || (code == best.mbus_code &&
+                    (area > best_area || (area == best_area && width > best.width)))))) {
+                    best=(cc_sensor_format){code,width,height};
+                    best_score=score; best_area=area;
+                }
+                continue;
+            }
             /* The common request height cancels in the aspect-ratio comparison. */
             uint64_t a=(uint64_t)width*request->height, b=(uint64_t)request->width*height;
             uint64_t ratio=a > b ? a-b : b-a, area=(uint64_t)width*height;
@@ -120,4 +179,20 @@ int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request
     if (!best.mbus_code) return -ENOENT;
     *out=best;
     return 0;
+}
+
+int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request *request,
+                                 cc_sensor_format *out)
+{
+    return select_mode(camera,request,0,out);
+}
+
+int cc_camera_select_rpi_sensor_mode(cc_camera *camera, const cc_rpi_sensor_mode_request *request,
+                                     cc_sensor_format *out)
+{
+    if (!request || (request->bit_depth != 8 && request->bit_depth != 10 && request->bit_depth != 12 &&
+        request->bit_depth != 14 && request->bit_depth != 16)) return -EINVAL;
+    cc_sensor_mode_request generic={.mbus_codes=request->mbus_codes,.num_mbus_codes=request->num_mbus_codes,
+        .width=request->width,.height=request->height};
+    return select_mode(camera,&generic,request->bit_depth,out);
 }

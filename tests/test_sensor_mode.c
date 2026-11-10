@@ -15,6 +15,7 @@
 #define B10 MEDIA_BUS_FMT_SBGGR10_1X10
 
 struct native_mode { uint32_t code, width, height; };
+#include "rpi_sensor_mode_vectors.h"
 struct fake {
     cc_camera camera;
     struct cc_media media;
@@ -22,9 +23,9 @@ struct fake {
     struct media_pad_desc pads[3];
     bool streams[1];
     cc_stream stream;
-    uint32_t codes[3];
+    uint32_t codes[32];
     size_t count;
-    struct native_mode modes[16];
+    struct native_mode modes[32];
     size_t mode_count;
     unsigned code_calls, size_calls, format_calls;
     unsigned long fail_request;
@@ -260,8 +261,141 @@ static void test_errors_and_bounds(void)
     CHECK(!memcmp(&mode,&saved,sizeof(mode)));
 }
 
-int main(void)
+static void expect_rpi(struct fake *f, const cc_rpi_sensor_mode_request *r,
+                        uint32_t code, uint32_t width, uint32_t height)
 {
+    cc_sensor_format out;
+    OK(cc_camera_select_rpi_sensor_mode(&f->camera,r,&out));
+    CHECK(out.mbus_code==code && out.width==width && out.height==height);
+}
+static void expect_rpi_error(struct fake *f, const cc_rpi_sensor_mode_request *r, int error)
+{
+    cc_sensor_format out={0xdeadbeef,1234,5678}, saved=out;
+    CHECK(cc_camera_select_rpi_sensor_mode(&f->camera,r,&out)==-error);
+    CHECK(!memcmp(&out,&saved,sizeof(out)));
+}
+static void test_rpi_reference(void)
+{
+    struct fake f; initialize(&f);
+    f.count=0; f.mode_count=sizeof(rpi_reference_modes)/sizeof(rpi_reference_modes[0]);
+    memcpy(f.modes,rpi_reference_modes,sizeof(rpi_reference_modes));
+    for (size_t m=0; m<f.mode_count; ++m) {
+        size_t c=0;
+        while (c<f.count && f.codes[c]!=f.modes[m].code) ++c;
+        if (c==f.count) f.codes[f.count++]=f.modes[m].code;
+    }
+    uint32_t codes[32]; memcpy(codes,f.codes,sizeof(codes));
+    cc_rpi_sensor_mode_request r={.mbus_codes=codes,.num_mbus_codes=f.count};
+    for (unsigned permutation=0; permutation<2; ++permutation) {
+        for (size_t v=0; v<sizeof(rpi_reference_vectors)/sizeof(rpi_reference_vectors[0]); ++v) {
+            r.width=rpi_reference_vectors[v].width; r.height=rpi_reference_vectors[v].height;
+            r.bit_depth=rpi_reference_vectors[v].depth;
+            expect_rpi(&f,&r,rpi_reference_vectors[v].code,
+                rpi_reference_vectors[v].out_width,rpi_reference_vectors[v].out_height);
+        }
+        /* Driver and caller order must not affect upstream's sorted tie rules. */
+        for (size_t i=0; i<f.count/2; ++i) {
+            uint32_t t=f.codes[i]; f.codes[i]=f.codes[f.count-1-i]; f.codes[f.count-1-i]=t;
+            t=codes[i]; codes[i]=codes[f.count-1-i]; codes[f.count-1-i]=t;
+        }
+        for (size_t i=0; i<f.mode_count/2; ++i) {
+            struct native_mode t=f.modes[i]; f.modes[i]=f.modes[f.mode_count-1-i]; f.modes[f.mode_count-1-i]=t;
+        }
+    }
+}
+static void test_rpi_ranking(void)
+{
+    struct fake f; initialize(&f);
+    const uint32_t codes[]={R12,R10,B10};
+    cc_rpi_sensor_mode_request r={.mbus_codes=codes,.num_mbus_codes=3,.width=640,.height=480,.bit_depth=12};
+    expect_rpi(&f,&r,R12,1280,960); /* Bit-depth penalty beats exact dimensions. */
+    r.bit_depth=10; r.width=5000; r.height=4000;
+    expect_rpi(&f,&r,R12,3840,2160); /* Smaller-than-request fallback. */
+    f.count=2; f.codes[0]=B10; f.codes[1]=R10;
+    f.mode_count=2; f.modes[0]=(struct native_mode){R10,640,480};
+    f.modes[1]=(struct native_mode){B10,640,480};
+    r.width=640; r.height=480;
+    expect_rpi(&f,&r,R10,640,480); /* Greater code wins, regardless of code order. */
+    f.count=1; f.codes[0]=R10; r.num_mbus_codes=1; r.mbus_codes=&f.codes[0];
+    f.modes[0]=(struct native_mode){R10,2080,1560};
+    f.modes[1]=(struct native_mode){R10,640,480}; r.width=800; r.height=600;
+    expect_rpi(&f,&r,R10,2080,1560); /* Equal score: larger area wins. */
+    f.modes[0]=(struct native_mode){R10,800,100};
+    f.modes[1]=(struct native_mode){R10,100,800}; r.width=10; r.height=10;
+    expect_rpi(&f,&r,R10,800,100); /* Equal area and score: larger width wins. */
+    f.modes[0]=(struct native_mode){R10,UINT32_MAX,UINT32_MAX};
+    f.modes[1]=(struct native_mode){R10,640,480}; r.width=UINT32_MAX; r.height=UINT32_MAX;
+    expect_rpi(&f,&r,R10,UINT32_MAX,UINT32_MAX);
+    f.range=true; r.width=1000; r.height=750;
+    expect_rpi(&f,&r,R10,640,480); /* No invented intermediate range values. */
+    f.stream.configured=f.stream.streaming=f.stream.allocated=true;
+    expect_rpi(&f,&r,R10,640,480);
+    CHECK(f.stream.configured && f.stream.streaming && f.stream.allocated && !f.camera.sensor_stream);
+    static const struct { uint32_t code,depth; } formats[]={
+#define RAW(bits) \
+        {MEDIA_BUS_FMT_SBGGR##bits##_1X##bits,bits}, {MEDIA_BUS_FMT_SGBRG##bits##_1X##bits,bits}, \
+        {MEDIA_BUS_FMT_SGRBG##bits##_1X##bits,bits}, {MEDIA_BUS_FMT_SRGGB##bits##_1X##bits,bits}, \
+        {MEDIA_BUS_FMT_Y##bits##_1X##bits,bits}
+        RAW(8), RAW(10), RAW(12), RAW(14), RAW(16)
+#undef RAW
+    };
+    f.range=false; f.mode_count=1; r.width=640; r.height=480;
+    for (size_t i=0; i<sizeof(formats)/sizeof(formats[0]); ++i) {
+        f.codes[0]=formats[i].code; r.bit_depth=formats[i].depth;
+        f.modes[0]=(struct native_mode){f.codes[0],640,480};
+        expect_rpi(&f,&r,f.codes[0],640,480);
+    }
+}
+static void test_rpi_errors(void)
+{
+    struct fake f; initialize(&f);
+    const uint32_t codes[]={R10,R12};
+    cc_rpi_sensor_mode_request r={.mbus_codes=codes,.num_mbus_codes=2,.width=640,.height=480,.bit_depth=10};
+    cc_sensor_format out;
+    CHECK(cc_camera_select_rpi_sensor_mode(NULL,&r,&out)==-EINVAL);
+    CHECK(cc_camera_select_rpi_sensor_mode(&f.camera,&r,NULL)==-EINVAL);
+    CHECK(cc_cfe_select_rpi_sensor_mode(NULL,&r,&out)==-EINVAL);
+    expect_rpi_error(&f,NULL,EINVAL);
+    cc_rpi_sensor_mode_request invalid=r; invalid.mbus_codes=NULL; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid=r; invalid.num_mbus_codes=0; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid=r; invalid.num_mbus_codes=257; expect_rpi_error(&f,&invalid,E2BIG);
+    invalid=r; invalid.width=0; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid=r; invalid.height=0; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid=r; invalid.bit_depth=0; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid=r; invalid.bit_depth=11; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid=r; invalid.num_mbus_codes=1;
+    const uint32_t zero=0, unsupported=MEDIA_BUS_FMT_UYVY8_2X8;
+    invalid.mbus_codes=&zero; expect_rpi_error(&f,&invalid,EINVAL);
+    invalid.mbus_codes=&unsupported; expect_rpi_error(&f,&invalid,ENOTSUP);
+    CHECK(!f.code_calls && !f.size_calls && !f.format_calls);
+    f.camera.sensor_fd=-1; expect_rpi_error(&f,&r,ENOTSUP); f.camera.sensor_fd=11;
+    for (unsigned bad=1; bad<=5; ++bad) { f.bad_code=bad; expect_rpi_error(&f,&r,EPROTO); }
+    f.bad_code=0;
+    for (unsigned bad=1; bad<=9; ++bad) { f.bad_size=bad; expect_rpi_error(&f,&r,EPROTO); }
+    f.bad_size=0;
+    f.codes[1]=R10; expect_rpi_error(&f,&r,EPROTO); f.codes[1]=R12;
+    f.count=0; expect_rpi_error(&f,&r,ENOENT); f.count=3;
+    f.mode_count=0; expect_rpi_error(&f,&r,ENOENT); initialize(&f);
+    f.fail_request=VIDIOC_SUBDEV_ENUM_MBUS_CODE; f.fail_index=1; f.fail_error=EIO;
+    expect_rpi_error(&f,&r,EIO);
+    f.fail_index=0; f.fail_error=ENOTTY; expect_rpi_error(&f,&r,ENOTSUP);
+    f.fail_request=VIDIOC_SUBDEV_ENUM_FRAME_SIZE; f.fail_error=EIO; f.fail_index=1;
+    expect_rpi_error(&f,&r,EIO);
+    f.fail_index=0; f.fail_error=ENOTTY; expect_rpi_error(&f,&r,ENOTSUP); f.fail_request=0;
+    f.endless_codes=true; expect_rpi_error(&f,&r,E2BIG); f.endless_codes=false;
+    f.endless_sizes=true; expect_rpi_error(&f,&r,E2BIG); f.endless_sizes=false;
+    f.count=1; f.endless_sizes=true; f.fail_request=VIDIOC_SUBDEV_ENUM_FRAME_SIZE;
+    f.fail_index=4096; f.fail_error=EINVAL;
+    expect_rpi(&f,&r,R10,640,480);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc==2 && !strcmp(argv[1],"rpi")) {
+        test_rpi_reference(); test_rpi_ranking(); test_rpi_errors();
+        puts("Pi mode scoring, upstream fixtures, tie rules and bounded read-only queries passed");
+        return 0;
+    }
     test_ranking(); test_large_dimensions(); test_reference_vectors(); test_errors_and_bounds();
     puts("Sensor mode ranking, exact arithmetic, read-only negotiation and bounded native replies passed");
     return 0;

@@ -21,8 +21,8 @@ external porting reference, not a build or runtime dependency.
   VIMC Sensor B/debayer/scaler pipeline.
 
 Shared features include queued capture requests, MMAP/DMA-BUF buffers, native
-controls, read-only sensor-mode selection, sensor timing helpers and optional
-C IPA modules for exposure, white balance and autofocus. An opt-in calibrated
+controls, read-only generic and Pi sensor-mode selection, sensor timing helpers
+and optional C IPA modules for exposure, white balance and autofocus. An opt-in calibrated
 OV5647/VC4 still profile is available; broader tuning and advanced algorithms
 remain pending.
 

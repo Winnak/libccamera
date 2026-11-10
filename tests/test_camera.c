@@ -1395,6 +1395,10 @@ static cc_cfe *open_frontend(struct fake *f, cc_cfe_configuration *config)
     cc_sensor_format selected;
     OK(cc_cfe_select_sensor_mode(cfe,&mode_request,&selected));
     CHECK(selected.mbus_code==mode_code && selected.width==64 && selected.height==32);
+    cc_rpi_sensor_mode_request rpi_mode_request={.mbus_codes=&mode_code,.num_mbus_codes=1,
+        .width=64,.height=64,.bit_depth=12};
+    OK(cc_cfe_select_rpi_sensor_mode(cfe,&rpi_mode_request,&selected));
+    CHECK(selected.mbus_code==mode_code && selected.width==64 && selected.height==32);
     *config = (cc_cfe_configuration) { .sensor = { .fourcc = V4L2_PIX_FMT_SRGGB10P, .width = 64, .height = 64 } };
     OK(cc_cfe_configure(cfe, config));
     CHECK(config->image.fourcc == V4L2_PIX_FMT_SRGGB16 && config->image.planes[0].stride == 128);

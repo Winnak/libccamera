@@ -164,11 +164,53 @@ unchanged on every failure. Enumeration is bounded to 256 advertised codes and
 4096 size ranges across accepted codes; requests accept at most 256 codes.
 Exceeding these bounds returns `-E2BIG`. Duplicate advertised codes are rejected.
 
-This implements the generic sensor policy from the archived libcamera 0.7.2
-reference. Pi's weighted dimension/aspect/bit-depth policy, frame-rate selection,
-stream-role generation and automatic assignment of modes to processing graphs
-remain pending. VIMC sensor sizes also need its scaler's output conversion; UVC
-and self-contained V4L2 nodes use capture-node formats instead of this query.
+### Raspberry Pi selection policy
+
+`cc_camera_select_rpi_sensor_mode` and `cc_cfe_select_rpi_sensor_mode` implement
+the archived libcamera 0.7.2 Pi pipeline's weighted policy. Supply desired
+dimensions and sample depth along with the native Bayer/mono MBUS codes accepted
+by your capture path. Depths of 8, 10, 12, 14 and 16 bits are supported; 12 is the
+upstream pipeline's usual default. Accepted code order has no effect. Mono
+14-bit support applies the same scoring to this port's additional native format;
+the archived upstream format table lacks that code.
+
+```c
+const uint32_t pi_codes[] = {
+    MEDIA_BUS_FMT_SRGGB10_1X10, MEDIA_BUS_FMT_SRGGB12_1X12
+};
+cc_rpi_sensor_mode_request pi_request = {
+    .mbus_codes = pi_codes, .num_mbus_codes = 2,
+    .width = 1920, .height = 1080, .bit_depth = 12
+};
+cc_sensor_format pi_sensor;
+int pi_ret = cc_camera_select_rpi_sensor_mode(camera, &pi_request, &pi_sensor);
+```
+
+For each range's maximum size, the score is width error plus height error, plus
+1500 times aspect-ratio error, plus 500 per bit of depth difference. Each error
+is twice the absolute difference when the candidate value is smaller than the
+desired value, or one quarter of the difference when larger. The lowest score
+wins. Equal scores prefer the greater numeric MBUS code, then larger area, then
+larger width, matching upstream's sorted traversal and replacement on equal
+score. This permits a mode smaller than either desired dimension. Unlike the
+generic policy's exact ratio comparisons, Pi scoring uses upstream's `double`
+arithmetic.
+
+This query has the same read-only behavior, range handling, enumeration bounds
+and output-on-error guarantees as the generic selector. An accepted code outside
+the supported native Bayer/mono formats returns `-ENOTSUP`; zero codes and
+invalid dimensions/depth return `-EINVAL`. It does not check whether a selected
+mode reaches a desired frame rate. The fixture generator can reproduce 80
+upstream comparisons from the documented archive:
+
+```sh
+python3 tools/generate_rpi_sensor_modes.py /path/to/libcamera-0.7.2-reference-ce4d60131c5f.tar.xz
+```
+
+Frame-rate selection, stream-role generation and automatic assignment of modes
+to processing graphs remain pending. VIMC sensor sizes also need its scaler's
+output conversion; UVC and self-contained V4L2 nodes use capture-node formats
+instead of these sensor queries.
 
 ## Frame intervals
 

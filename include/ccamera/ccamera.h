@@ -81,6 +81,13 @@ typedef struct cc_sensor_mode_request {
     uint32_t max_width, max_height; /* Both zero for no upper bound. */
 } cc_sensor_mode_request;
 
+typedef struct cc_rpi_sensor_mode_request {
+    const uint32_t *mbus_codes; /* Accepted native Bayer/mono codes; order has no effect. */
+    size_t num_mbus_codes;
+    uint32_t width, height; /* Desired dimensions, both positive; smaller modes may win. */
+    uint32_t bit_depth; /* Desired sample depth: 8, 10, 12, 14 or 16. */
+} cc_rpi_sensor_mode_request;
+
 typedef struct cc_fraction { uint32_t numerator, denominator; } cc_fraction;
 enum cc_frame_interval_type { CC_INTERVAL_DISCRETE=1, CC_INTERVAL_CONTINUOUS=2, CC_INTERVAL_STEPWISE=3 };
 typedef struct cc_frame_interval_range {
@@ -163,6 +170,16 @@ CC_API int cc_camera_enum_sensor_mode(cc_camera *camera, uint32_t code_index,
  * Calls must be serialized with other operations on this camera. */
 CC_API int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request *request,
                                         cc_sensor_format *format);
+/* Read-only Raspberry Pi libcamera policy: weighted width/height/aspect error
+ * plus 500 per bit of sample-depth difference. Oversize dimension/aspect errors
+ * cost one eighth as much as undersize errors. Exact score ties prefer the
+ * greater numeric MBUS code, then larger area, then width (upstream sort order).
+ * Accepts native 8/10/12/14/16-bit Bayer and mono MBUS codes; unsupported request
+ * codes return -ENOTSUP. Range maxima, enumeration bounds, serialization and
+ * error/output guarantees are the same as cc_camera_select_sensor_mode.
+ * No frame-rate filtering or graph configuration is performed. */
+CC_API int cc_camera_select_rpi_sensor_mode(cc_camera *camera, const cc_rpi_sensor_mode_request *request,
+                                            cc_sensor_format *format);
 /* Capture-node intervals use FOURCC and output geometry. Sensor intervals use
  * MBUS codes and sensor geometry on the discovered image pad/stream. Native
  * unsupported ioctls return -ENOTSUP; enumeration ends with -ENOENT. */

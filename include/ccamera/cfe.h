@@ -106,6 +106,9 @@ CC_API int cc_cfe_get_sensor(cc_cfe *cfe, const cc_sensor_model **model);
 /* Same read-only generic selection policy as cc_camera_select_sensor_mode. */
 CC_API int cc_cfe_select_sensor_mode(cc_cfe *cfe, const cc_sensor_mode_request *request,
                                      cc_sensor_format *format);
+/* Same read-only Pi selection policy as cc_camera_select_rpi_sensor_mode. */
+CC_API int cc_cfe_select_rpi_sensor_mode(cc_cfe *cfe, const cc_rpi_sensor_mode_request *request,
+                                         cc_sensor_format *format);
 CC_API int cc_cfe_get_sensor_timing(cc_cfe *cfe, cc_sensor_timing *timing);
 CC_API int cc_cfe_get_frame_interval(cc_cfe *cfe,cc_fraction *interval);
 CC_API int cc_cfe_set_frame_interval(cc_cfe *cfe,cc_fraction *interval);
