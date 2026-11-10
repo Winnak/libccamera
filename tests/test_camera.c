@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "internal.h"
+#include <ccamera/ipa_proxy.h>
+#include "monitor.h"
+#include <ccamera/configuration.h>
 #include "subdev_compat.h"
 #include <ccamera/capture.h>
 #include "media_v2_driver.h"
@@ -16,6 +19,19 @@
 
 /* These checks stay active in Release builds; none of the driver interactions
  * are hidden in assert(), which NDEBUG could otherwise remove. */
+static const char *proxy_worker;
+static int create_reference(const cc_ipa_reference_tuning *tuning, cc_ipa **ipa)
+{
+    if (!proxy_worker) return cc_ipa_reference_create(tuning, ipa);
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker};
+    return cc_ipa_reference_create_proxy(tuning, &options, ipa);
+}
+static int proxy_available(void)
+{
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker}; cc_ipa *ipa = NULL;
+    int ret = cc_ipa_vc4_create_proxy(NULL, &options, &ipa); cc_ipa_destroy(ipa);
+    return ret == -ENOSYS || ret == -EPERM || ret == -EACCES ? 77 : ret;
+}
 #define CHECK(x) do { if (!(x)) { \
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); \
 } } while (0)
@@ -25,6 +41,7 @@
 #define VIDEO_FD 20
 #define MEDIA_FD 10
 #define SENSOR_FD 11
+#define SENSOR_SECOND_FD 12
 #define MUX_FD 14
 #define FE_FD 15
 #define FE_VIDEO_BASE 30
@@ -36,6 +53,14 @@
 #define CONTROL_VBLANK V4L2_CID_VBLANK
 
 struct fake {
+    bool validation_only, bad_try_pad;
+    unsigned try_formats;
+    bool identity_enabled, identity_changed, identity_duplicate, identity_missing, identity_race, identity_empty_scan, identity_fault;
+    unsigned node_shift;
+    bool orientation_enabled, orientation_read_only, orientation_clamp, orientation_partial, orientation_mono;
+    int32_t orientation_rotation;
+    uint32_t orientation_flips, orientation_codes[4], orientation_return_code;
+    unsigned orientation_writes;
     bool uvc_controls, uvc_media, uvc_v2, uvc_extra_default, uvc_missing_default;
     bool uvc_clamp, uvc_bad_ack, uvc_bad_menu;
     uint32_t uvc_missing;
@@ -64,7 +89,7 @@ struct fake {
         bool streaming, queued[4];
         void *data[4];
     } fe_nodes[4];
-    struct v4l2_mbus_framefmt fe_format;
+    struct v4l2_mbus_framefmt fe_format, fe_try;
     struct pisp_fe_config last_parameters;
     bool fe_bad_pair, fe_bad_image1, fe_fail_stop, fe_parameter_error;
     bool clean_frames;
@@ -132,6 +157,17 @@ static int fake_open(void *ctx, const char *path, int flags)
     if (f->fail_open)
         return -EACCES;
     CHECK(flags & O_CLOEXEC);
+    char normalized[CC_PATH_MAX];
+    if (f->node_shift) {
+        const char *prefixes[]={"/dev/media","/dev/video","/dev/v4l-subdev"};
+        for (size_t i=0; i<3; ++i) if (!strncmp(path,prefixes[i],strlen(prefixes[i]))) {
+            char *end;
+            unsigned long index=strtoul(path+strlen(prefixes[i]),&end,10);
+            if (*end || index<f->node_shift) return -ENOENT;
+            snprintf(normalized,sizeof(normalized),"%s%lu",prefixes[i],index-f->node_shift);
+            path=normalized; break;
+        }
+    }
     ++f->opened;
     if (!strcmp(path, "/dev/video0"))
         return VIDEO_FD;
@@ -139,6 +175,8 @@ static int fake_open(void *ctx, const char *path, int flags)
         return MEDIA_FD;
     if (!strcmp(path, "/dev/v4l-subdev0"))
         return SENSOR_FD;
+    if (!strcmp(path, "/dev/v4l-subdev1"))
+        return SENSOR_SECOND_FD;
     if (!strcmp(path, "/dev/v4l-subdev2"))
         return MUX_FD;
     if (f->frontend && !strcmp(path, "/dev/v4l-subdev3"))
@@ -267,12 +305,14 @@ static int fake_resolve(void *ctx, unsigned int major_id, unsigned int minor_id,
 {
     struct fake *f = ctx;
     CHECK(major_id == 81);
+    if (minor_id<f->node_shift) return -ENOENT;
+    minor_id-=f->node_shift;
     if (f->frontend && minor_id >= 5)
-        snprintf(path, size, "/dev/video%u", minor_id - 4);
+        snprintf(path, size, "/dev/video%u", minor_id - 4+f->node_shift);
     else if (minor_id == 0)
-        snprintf(path, size, "/dev/video0");
+        snprintf(path, size, "/dev/video%u",f->node_shift);
     else
-        snprintf(path, size, "/dev/v4l-subdev%u", minor_id - 1);
+        snprintf(path, size, "/dev/v4l-subdev%u", minor_id - 1+f->node_shift);
     return 0;
 }
 
@@ -312,6 +352,7 @@ static struct media_entity_desc entity_desc(const struct fake *f, uint32_t id)
         entity.dev.minor = id == 1 ? 1 : 2;
     }
     if (id==3 && f->uvc_extra_default) { entity.flags=MEDIA_ENT_FL_DEFAULT; entity.type=MEDIA_ENT_F_IO_V4L; }
+    if (entity.dev.major) entity.dev.minor+=f->node_shift;
     return entity;
 }
 
@@ -427,6 +468,17 @@ static int fake_control_ioctl(struct fake *f, int fd, unsigned long req, void *a
 {
     if (f->uvc_controls) { CHECK(fd==VIDEO_FD); return fake_uvc_control(f,req,arg); }
     CHECK(fd == (f->pi ? SENSOR_FD : VIDEO_FD));
+    if (f->orientation_enabled && req==VIDIOC_QUERY_EXT_CTRL) {
+        struct v4l2_query_ext_ctrl *q=arg;
+        if (q->id==V4L2_CID_CAMERA_SENSOR_ROTATION) {
+            q->type=V4L2_CTRL_TYPE_INTEGER; q->maximum=359; q->step=1; q->elems=1;
+            q->elem_size=4; q->default_value=f->orientation_rotation; q->flags=V4L2_CTRL_FLAG_READ_ONLY; return 0;
+        }
+        if (q->id==V4L2_CID_HFLIP || q->id==V4L2_CID_VFLIP) {
+            q->type=V4L2_CTRL_TYPE_BOOLEAN; q->maximum=1; q->step=1; q->elems=1; q->elem_size=4;
+            q->flags=V4L2_CTRL_FLAG_MODIFY_LAYOUT|(f->orientation_read_only ? V4L2_CTRL_FLAG_READ_ONLY:0U); return 0;
+        }
+    }
     if (req == VIDIOC_QUERY_EXT_CTRL) {
         struct v4l2_query_ext_ctrl *query = arg;
         if (query->id & V4L2_CTRL_FLAG_NEXT_CTRL) {
@@ -466,6 +518,9 @@ static int fake_control_ioctl(struct fake *f, int fd, unsigned long req, void *a
             query->dims[0] = 8;
             return 0;
         case CONTROL_LAYOUT:
+            query->type = V4L2_CTRL_TYPE_BOOLEAN;
+            query->maximum = 1;
+            query->default_value = 0;
             query->flags = V4L2_CTRL_FLAG_MODIFY_LAYOUT;
             return 0;
         case CONTROL_MASK:
@@ -480,6 +535,18 @@ static int fake_control_ioctl(struct fake *f, int fd, unsigned long req, void *a
     bool get = req == VIDIOC_G_EXT_CTRLS;
     for (uint32_t i = 0; i < batch->count; ++i) {
         struct v4l2_ext_control *control = &batch->controls[i];
+        if (f->orientation_enabled && (control->id==V4L2_CID_HFLIP || control->id==V4L2_CID_VFLIP)) {
+            uint32_t bit=control->id==V4L2_CID_HFLIP ? 1U:2U;
+            if (!get) {
+                CHECK(!f->orientation_read_only && control->value>=0 && control->value<=1);
+                if (f->orientation_clamp) control->value=0;
+                f->orientation_flips=(f->orientation_flips&~bit)|(control->value ? bit:0U);
+                ++f->orientation_writes;
+                if (f->orientation_partial && i==0) return -EIO;
+            }
+            control->value=(f->orientation_flips&bit)!=0;
+            continue;
+        }
         switch (control->id) {
         case V4L2_CID_ANALOGUE_GAIN:
             if (get) control->value = (int32_t)f->analogue_gain;
@@ -542,7 +609,8 @@ static int fake_control_ioctl(struct fake *f, int fd, unsigned long req, void *a
 
 static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *arg)
 {
-    CHECK(fd == SENSOR_FD || fd == MUX_FD || (f->frontend && fd == FE_FD));
+    CHECK(fd == SENSOR_FD || fd == SENSOR_SECOND_FD || fd == MUX_FD || (f->frontend && fd == FE_FD));
+    if (req==CC_SD_G_SELECTION) return -ENOTTY;
     if (req==CC_SD_G_FRAME_INTERVAL || req==CC_SD_S_FRAME_INTERVAL) {
         CHECK(fd==SENSOR_FD); struct cc_subdev_frame_interval *q=arg;
         CHECK(!q->pad && !q->stream && !q->which);
@@ -559,10 +627,15 @@ static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *ar
         struct v4l2_subdev_format *format = arg;
         CHECK(format->pad == 0 || format->pad == 2 || format->pad == 3);
         if (req == VIDIOC_SUBDEV_S_FMT) {
-            CHECK(format->format.code == MEDIA_BUS_FMT_SRGGB16_1X16);
-            f->fe_format = format->format;
+            const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB16_1X16,MEDIA_BUS_FMT_SGRBG16_1X16,
+                MEDIA_BUS_FMT_SGBRG16_1X16,MEDIA_BUS_FMT_SBGGR16_1X16};
+            if (format->which==V4L2_SUBDEV_FORMAT_ACTIVE)
+                CHECK(format->format.code == (f->orientation_mono ? MEDIA_BUS_FMT_Y16_1X16:codes[f->orientation_enabled ? f->orientation_flips:0]));
+            if (format->which==V4L2_SUBDEV_FORMAT_TRY) f->fe_try=format->format;
+            else f->fe_format = format->format;
         }
-        format->format = f->fe_format;
+        format->format = format->which==V4L2_SUBDEV_FORMAT_TRY ? f->fe_try:f->fe_format;
+        if (f->bad_try_pad && format->which==V4L2_SUBDEV_FORMAT_TRY) ++format->pad;
         return 0;
     }
     if (req == CC_SD_QUERYCAP) {
@@ -605,12 +678,12 @@ static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *ar
         CHECK(code->pad == 0);
         if (code->index)
             return -EINVAL;
-        code->code = MEDIA_BUS_FMT_SRGGB10_1X10;
+        code->code = f->orientation_enabled ? f->orientation_codes[f->orientation_flips]:MEDIA_BUS_FMT_SRGGB10_1X10;
         return 0;
     }
     if (req == VIDIOC_SUBDEV_ENUM_FRAME_SIZE) {
         struct v4l2_subdev_frame_size_enum *size = arg;
-        CHECK(size->code == MEDIA_BUS_FMT_SRGGB10_1X10 && size->pad == 0);
+        CHECK(size->code == (f->orientation_enabled ? f->orientation_codes[f->orientation_flips]:MEDIA_BUS_FMT_SRGGB10_1X10) && size->pad == 0);
         if (size->index)
             return -EINVAL;
         size->min_width = size->max_width = 64;
@@ -627,13 +700,18 @@ static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *ar
         current = format->which == V4L2_SUBDEV_FORMAT_TRY ? &f->mux_try : &f->mux_active;
     }
     if (f->frontend && fd == MUX_FD && format->pad == (f->streams ? 1U : 4U) && req == VIDIOC_SUBDEV_S_FMT) {
-        CHECK(format->format.code == MEDIA_BUS_FMT_SRGGB16_1X16);
-        f->mux_active = format->format;
+        const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB16_1X16,MEDIA_BUS_FMT_SGRBG16_1X16,
+            MEDIA_BUS_FMT_SGBRG16_1X16,MEDIA_BUS_FMT_SBGGR16_1X16};
+        if (format->which==V4L2_SUBDEV_FORMAT_ACTIVE)
+            CHECK(format->format.code == (f->orientation_mono ? MEDIA_BUS_FMT_Y16_1X16:codes[f->orientation_enabled ? f->orientation_flips:0]));
+        *current = format->format;
         return 0;
     }
     if (req == VIDIOC_SUBDEV_S_FMT) {
-        if (format->format.code != MEDIA_BUS_FMT_SRGGB10_1X10)
+        if (!f->orientation_enabled && format->format.code != MEDIA_BUS_FMT_SRGGB10_1X10)
             return -EINVAL;
+        if (f->orientation_enabled && fd==SENSOR_FD)
+            format->format.code=f->orientation_return_code ? f->orientation_return_code:f->orientation_codes[f->orientation_flips];
         format->format.width = 64;
         format->format.height = f->frontend ? 64 : 32;
         if (fd == MUX_FD) {
@@ -646,6 +724,8 @@ static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *ar
     } else if (fd == MUX_FD) {
         CHECK(format->pad == (f->cfe && !f->streams ? 4U : 1U));
     }
+    if (f->orientation_enabled && fd==SENSOR_FD && req==VIDIOC_SUBDEV_G_FMT)
+        current->code=f->orientation_codes[f->orientation_flips];
     format->format = *current;
     return 0;
 }
@@ -661,9 +741,10 @@ static int fake_frontend_ioctl(struct fake *f, int fd, unsigned long req, void *
             port == 1 ? V4L2_CAP_META_CAPTURE : V4L2_CAP_META_OUTPUT);
         return 0;
     }
-    if (req == VIDIOC_S_FMT || req == VIDIOC_G_FMT) {
+    if (req == VIDIOC_S_FMT || req == VIDIOC_G_FMT || req==VIDIOC_TRY_FMT) {
         struct v4l2_format *v = arg;
-        if (req == VIDIOC_S_FMT) {
+        cc_format saved=f->fe_nodes[port].format;
+        if (req != VIDIOC_G_FMT) {
             if (!port || port == 3) {
                 f->fe_nodes[port].format = (cc_format) { .width = v->fmt.pix.width,
                     .height = v->fmt.pix.height, .fourcc = v->fmt.pix.pixelformat,
@@ -687,6 +768,7 @@ static int fake_frontend_ioctl(struct fake *f, int fd, unsigned long req, void *
             v->fmt.meta.dataformat = format->fourcc;
             v->fmt.meta.buffersize = format->planes[0].size;
         }
+        if (req==VIDIOC_TRY_FMT) { ++f->try_formats; f->fe_nodes[port].format=saved; }
         return 0;
     }
     if (req == VIDIOC_REQBUFS) {
@@ -737,7 +819,8 @@ static int fake_frontend_ioctl(struct fake *f, int fd, unsigned long req, void *
             CHECK(f->last_parameters.global.enables & PISP_FE_ENABLE_INPUT);
             CHECK(f->last_parameters.global.enables & PISP_FE_ENABLE_OUTPUT0);
             CHECK(f->last_parameters.input.streaming == 1 && f->last_parameters.input.format.width == 64);
-            CHECK(f->last_parameters.ch[0].output.format.stride == 128);
+            int32_t stride=(f->fe_nodes[0].format.fourcc&0xffffU)==CC_FOURCC('P','C',0,0) ? 64:128;
+            CHECK(f->last_parameters.ch[0].output.format.stride == stride);
             CHECK(f->last_parameters.output_buffer[0].addr_lo == 0);
             ++f->fe_sequence;
             if (f->event_auto && f->fe_nodes[port].streaming) frame_event(f, f->fe_sequence - 1U);
@@ -781,6 +864,14 @@ static int fake_legacy_media(void *context,int fd,unsigned long req,void *arg)
 static int fake_ioctl(void *ctx, int fd, unsigned long req, void *arg)
 {
     struct fake *f = ctx;
+    if (f->validation_only) {
+        CHECK(req!=VIDIOC_S_FMT && req!=VIDIOC_S_SELECTION && req!=MEDIA_IOC_SETUP_LINK &&
+              req!=VIDIOC_REQBUFS && req!=VIDIOC_STREAMON && req!=VIDIOC_STREAMOFF &&
+              req!=VIDIOC_S_EXT_CTRLS && req!=VIDIOC_S_CTRL);
+        if (req==VIDIOC_SUBDEV_S_FMT) CHECK(((struct v4l2_subdev_format *)arg)->which==V4L2_SUBDEV_FORMAT_TRY);
+        if (req==CC_SD_S_ROUTING) CHECK(((struct cc_subdev_routing *)arg)->which==V4L2_SUBDEV_FORMAT_TRY);
+        if (req==CC_SD_S_ROUTING_LEGACY) CHECK(((struct cc_subdev_routing_legacy *)arg)->which==V4L2_SUBDEV_FORMAT_TRY);
+    }
     if (f->fail_request == req && (!f->fail_fd || f->fail_fd == fd) && f->fail_nth > 0 && --f->fail_nth == 0)
         return -f->fail_errno;
     if (req == VIDIOC_SUBSCRIBE_EVENT || req == VIDIOC_UNSUBSCRIBE_EVENT || req == VIDIOC_DQEVENT) {
@@ -841,7 +932,14 @@ static int fake_ioctl(void *ctx, int fd, unsigned long req, void *arg)
     }
     if (req == VIDIOC_S_FMT || req == VIDIOC_G_FMT || req == VIDIOC_TRY_FMT) {
         struct v4l2_format *format = arg;
+        cc_format saved_active=f->active;
         CHECK(format->type == (f->multiplanar ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE : V4L2_BUF_TYPE_VIDEO_CAPTURE));
+        if (f->orientation_enabled && (req==VIDIOC_S_FMT || req==VIDIOC_TRY_FMT)) {
+            CHECK(!f->multiplanar);
+            f->active.fourcc=format->fmt.pix.pixelformat;
+            f->active.planes[0].stride=f->active.width*2;
+            f->active.planes[0].size=f->active.planes[0].stride*f->active.height;
+        }
         if (f->multiplanar) {
             struct v4l2_pix_format_mplane *p = &format->fmt.pix_mp;
             p->width = f->active.width;
@@ -872,6 +970,7 @@ static int fake_ioctl(void *ctx, int fd, unsigned long req, void *arg)
             p->quantization = f->active.quantization;
             p->xfer_func = f->active.xfer_func;
         }
+        if (req==VIDIOC_TRY_FMT) f->active=saved_active;
         return 0;
     }
     if (req == VIDIOC_REQBUFS) {
@@ -966,11 +1065,64 @@ static int fake_ioctl(void *ctx, int fd, unsigned long req, void *arg)
     return -ENOTTY;
 }
 
+static int fake_device_number(void *context,int fd,unsigned int *major_id,unsigned int *minor_id)
+{
+    struct fake *f=context;
+    if (!f->identity_enabled) return -ENOTSUP;
+    CHECK(fd==VIDEO_FD || fd==SENSOR_FD || fd==SENSOR_SECOND_FD);
+    *major_id=81;
+    *minor_id=f->node_shift+(fd==VIDEO_FD ? 0U:fd==SENSOR_FD ? 1U:2U);
+    if (f->identity_race && fd==SENSOR_FD) f->identity_changed=true;
+    return 0;
+}
+static int fake_canonical(void *context,const char *path,char *out,size_t capacity)
+{
+    struct fake *f=context;
+    if (!f->identity_enabled || f->identity_missing) return -ENOTSUP;
+    if (f->identity_fault) return -EIO;
+    unsigned int major_id,minor_id;
+    const char *value=NULL;
+    if (sscanf(path,"/sys/dev/char/%u:%u/device",&major_id,&minor_id)==2) {
+        CHECK(major_id==81 && minor_id>=f->node_shift);
+        minor_id-=f->node_shift;
+        if (minor_id==0) value="/sys/devices/platform/usb0/usb3/3-2/3-2:1.0";
+        if (minor_id==1) value="/sys/devices/platform/i2c-10/10-0010";
+        if (minor_id==2) value="/sys/devices/platform/i2c-11/11-0010";
+    } else if (!strcmp(path,"/sys/devices/platform/i2c-10/10-0010/of_node"))
+        value=f->identity_changed ? "/sys/firmware/devicetree/base/camera@30":"/sys/firmware/devicetree/base/camera@10";
+    else if (!strcmp(path,"/sys/devices/platform/i2c-11/11-0010/of_node"))
+        value=f->identity_duplicate ? "/sys/firmware/devicetree/base/camera@10":"/sys/firmware/devicetree/base/camera@11";
+    else if (!strcmp(path,"/sys/devices/platform/usb0/of_node")) value="/sys/firmware/devicetree/base/usb@0";
+    if (!value) return -ENOENT;
+    CHECK(strlen(value)<capacity); memcpy(out,value,strlen(value)+1); return 0;
+}
+static int fake_read_text(void *context,const char *path,char *out,size_t capacity)
+{
+    struct fake *f=context;
+    if (!f->identity_enabled || f->identity_missing) return -ENOTSUP;
+    const char *value=NULL;
+    if (!strcmp(path,"/sys/devices/platform/usb0/usb3/3-2/3-2:1.0/../idVendor")) value="046d\n";
+    if (!strcmp(path,"/sys/devices/platform/usb0/usb3/3-2/3-2:1.0/../idProduct")) value=f->identity_changed ? "9999\n":"0825\n";
+    if (!value) return -ENOENT;
+    CHECK(strlen(value)<capacity); memcpy(out,value,strlen(value)+1); return 0;
+}
+static int fake_scan_nodes(void *context,char ***out,size_t *count)
+{
+    struct fake *f=context;
+    if (f->identity_empty_scan) { *out=NULL; *count=0; return 0; }
+    char **nodes=calloc(2,sizeof(*nodes)); CHECK(nodes);
+    char path[64];
+    snprintf(path,sizeof(path),"/dev/media%u",f->node_shift); nodes[0]=strdup(path);
+    snprintf(path,sizeof(path),"/dev/video%u",f->node_shift); nodes[1]=strdup(path);
+    CHECK(nodes[0] && nodes[1]); *out=nodes; *count=2; return 0;
+}
+
 static const struct cc_io_ops fake_ops = {
     .open = fake_open, .close = fake_close, .ioctl = fake_ioctl,
     .map = fake_map, .unmap = fake_unmap, .lock = fake_lock,
     .wait = fake_wait, .now = fake_now, .resolve = fake_resolve, .wait_many = fake_wait_many,
-    .duplicate = fake_duplicate
+    .duplicate = fake_duplicate, .device_number=fake_device_number,
+    .canonical=fake_canonical,.read_text=fake_read_text,.scan_nodes=fake_scan_nodes
 };
 
 static cc_camera_info camera_info(bool pi)
@@ -1390,6 +1542,10 @@ static cc_cfe *open_frontend(struct fake *f, cc_cfe_configuration *config)
     info.pipeline = CC_PIPELINE_RPI_CFE;
     cc_cfe *cfe = NULL;
     OK(cc_cfe_open_io(&info, &io, &cfe));
+    cc_camera_properties properties;
+    OK(cc_cfe_get_properties(cfe,&properties));
+    CHECK(!strcmp(properties.model,"imx219") && properties.pixel_array_width==64 &&
+        properties.pixel_array_height==32 && properties.cfa==CC_CAMERA_CFA_RGGB);
     const uint32_t mode_code=MEDIA_BUS_FMT_SRGGB10_1X10;
     cc_sensor_mode_request mode_request={.mbus_codes=&mode_code,.num_mbus_codes=1,.width=64,.height=32};
     cc_sensor_format selected;
@@ -1675,6 +1831,9 @@ static cc_capture *request_graph(struct fake *f, bool frontend, uint32_t *count)
     cc_capture *capture = NULL;
     OK(cc_capture_create(&devices, &capture, count));
     CHECK(capture && !devices.camera && !devices.frontend);
+    cc_camera_properties properties;
+    OK(cc_capture_get_properties(capture,&properties));
+    CHECK(properties.flags&CC_CAMERA_PROPERTY_PIXEL_ARRAY && properties.pixel_array_width==64);
     return capture;
 }
 
@@ -2134,7 +2293,7 @@ static void test_ipa_cfe_feedback(void)
     cc_ipa_reference_tuning tuning={.flags=CC_IPA_REFERENCE_AE,.target_luminance=0.18,
         .exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4};
     cc_ipa *ipa;
-    OK(cc_ipa_reference_create(&tuning,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
+    OK(create_reference(&tuning,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
     ERROR(cc_capture_schedule_sensor_controls(c,2,NULL,0,0),EBUSY);
     cc_request *request,*out;
     OK(cc_request_create(123,&request));
@@ -2397,6 +2556,9 @@ static void test_uvc_graph(bool multiplanar,bool media,bool v2)
     }
     cc_camera *camera; OK(cc_camera_open_io(&info,&io,&camera));
     CHECK(cc_camera_get_info(camera)->pipeline==CC_PIPELINE_UVC && !camera->subdev_fds);
+    cc_camera_properties properties;
+    OK(cc_camera_get_properties(camera,&properties));
+    CHECK(properties.flags&CC_CAMERA_PROPERTY_LOCATION && properties.location==CC_CAMERA_LOCATION_EXTERNAL);
     cc_uvc_profile profile; OK(cc_camera_get_uvc_profile(camera,&profile)); CHECK(profile.flags==127 && profile.exposure_menu==10);
     cc_control_menu menu; OK(cc_camera_query_menu(camera,V4L2_CID_EXPOSURE_AUTO,3,&menu));
     CHECK(menu.id==V4L2_CID_EXPOSURE_AUTO && menu.index==3 && menu.type==V4L2_CTRL_TYPE_MENU && strlen(menu.name)==31);
@@ -2411,6 +2573,8 @@ static void test_uvc_graph(bool multiplanar,bool media,bool v2)
     allocate(camera,&f); CHECK(!f.sensor_set_calls && !f.mux_set_calls);
     uint32_t count=3; cc_capture_devices devices={.camera=camera}; cc_capture *capture;
     OK(cc_capture_create(&devices,&capture,&count)); cc_request *requests[3],*out;
+    cc_camera_properties adopted;
+    OK(cc_capture_get_properties(capture,&adopted)); CHECK(!memcmp(&properties,&adopted,sizeof(properties)));
     for (size_t i=0;i<3;++i) OK(cc_request_create(200+i,&requests[i]));
     cc_uvc_controls settings={.flags=127,.brightness=0.25,.contrast=1.25,.saturation=0.5,.gamma=2.36,
         .analogue_gain=2,.exposure_us=34567,.exposure_mode=CC_UVC_EXPOSURE_MANUAL};
@@ -2531,8 +2695,485 @@ static void test_startup_policy_trace(bool frontend)
     CHECK(f.opened==f.closed && !f.live_maps);
 }
 
+static void enable_orientation(struct fake *f, const uint32_t codes[4])
+{
+    f->orientation_enabled=true;
+    f->orientation_mono=codes[0]==MEDIA_BUS_FMT_Y8_1X8 || codes[0]==MEDIA_BUS_FMT_Y10_1X10 ||
+        codes[0]==MEDIA_BUS_FMT_Y12_1X12 || codes[0]==MEDIA_BUS_FMT_Y14_1X14 || codes[0]==MEDIA_BUS_FMT_Y16_1X16;
+    memcpy(f->orientation_codes,codes,sizeof(f->orientation_codes));
+    f->clean_frames=true;
+}
+
+static void test_oriented_raw(void)
+{
+    static const struct { uint32_t codes[4],fourccs[4]; enum cc_camera_cfa native; } modes[]={
+#define MODE(bits, suffix) {{MEDIA_BUS_FMT_SRGGB##bits##_1X##bits,MEDIA_BUS_FMT_SGRBG##bits##_1X##bits, \
+    MEDIA_BUS_FMT_SGBRG##bits##_1X##bits,MEDIA_BUS_FMT_SBGGR##bits##_1X##bits}, \
+    {V4L2_PIX_FMT_SRGGB##suffix,V4L2_PIX_FMT_SGRBG##suffix,V4L2_PIX_FMT_SGBRG##suffix,V4L2_PIX_FMT_SBGGR##suffix},CC_CAMERA_CFA_RGGB}
+        MODE(8,8), MODE(10,10), MODE(10,10P), MODE(12,12), MODE(12,12P),
+        MODE(14,14), MODE(14,14P), MODE(16,16),
+#define MONO(bits, fourcc) {{MEDIA_BUS_FMT_Y##bits##_1X##bits,MEDIA_BUS_FMT_Y##bits##_1X##bits, \
+    MEDIA_BUS_FMT_Y##bits##_1X##bits,MEDIA_BUS_FMT_Y##bits##_1X##bits},{fourcc,fourcc,fourcc,fourcc},CC_CAMERA_CFA_MONO}
+        MONO(8,V4L2_PIX_FMT_GREY), MONO(10,V4L2_PIX_FMT_Y10), MONO(10,V4L2_PIX_FMT_Y10P),
+        MONO(12,V4L2_PIX_FMT_Y12), MONO(12,CC_FOURCC('Y','1','2','P')), MONO(14,V4L2_PIX_FMT_Y14), MONO(16,V4L2_PIX_FMT_Y16)
+#undef MODE
+#undef MONO
+    };
+    const enum cc_orientation orientations[]={CC_ORIENTATION_ROTATE_0,CC_ORIENTATION_ROTATE_0_MIRROR,
+        CC_ORIENTATION_ROTATE_180_MIRROR,CC_ORIENTATION_ROTATE_180};
+    for (size_t mode=0; mode<sizeof(modes)/sizeof(modes[0]); ++mode) for (uint32_t flip=0; flip<4; ++flip) {
+        struct fake f=fake_new(true,false); enable_orientation(&f,modes[mode].codes);
+        cc_camera *camera=open_camera(&f);
+        cc_format format={.fourcc=modes[mode].fourccs[0],.width=64,.height=32};
+        enum cc_orientation orientation=orientations[flip];
+        enum cc_transform transform;
+        OK(cc_camera_try_orientation(camera,&orientation,&transform));
+        CHECK((uint32_t)transform==flip && !f.orientation_writes && !f.sensor_set_calls);
+        f.validation_only=true; cc_format predicted=format; enum cc_orientation predicted_o=orientation;
+        cc_format active=f.active; struct v4l2_mbus_framefmt sensor=f.sensor_active;
+        OK(cc_camera_try_format_oriented(camera,&predicted,&predicted_o));
+        CHECK(predicted_o==orientation && predicted.fourcc==modes[mode].fourccs[flip] &&
+            !f.orientation_writes && !memcmp(&active,&f.active,sizeof(active)) && !memcmp(&sensor,&f.sensor_active,sizeof(sensor)));
+        f.validation_only=false;
+        OK(cc_camera_configure_oriented(camera,&format,&orientation));
+        CHECK(orientation==orientations[flip] && f.orientation_flips==flip && f.orientation_writes==2);
+        CHECK(format.fourcc==modes[mode].fourccs[flip] && camera->stream->configured);
+        CHECK(f.sensor_active.code==modes[mode].codes[flip] && f.mux_active.code==modes[mode].codes[flip]);
+        cc_camera_properties properties; OK(cc_camera_get_properties(camera,&properties));
+        CHECK(properties.flags&CC_CAMERA_PROPERTY_CFA && properties.cfa==modes[mode].native);
+        /* Legacy configuration leaves the selected flips alone. */
+        OK(cc_camera_configure(camera,&format)); CHECK(f.orientation_writes==2 && f.orientation_flips==flip);
+        uint32_t count=2; OK(cc_camera_allocate_buffers(camera,&count));
+        cc_format saved=format; enum cc_orientation requested=CC_ORIENTATION_ROTATE_90;
+        ERROR(cc_camera_configure_oriented(camera,&format,&requested),EBUSY);
+        CHECK(requested==CC_ORIENTATION_ROTATE_90 && !memcmp(&format,&saved,sizeof(format)) && f.orientation_writes==2);
+        cc_capture_devices devices={.camera=camera}; cc_capture *graph;
+        OK(cc_capture_create(&devices,&graph,&count));
+        OK(cc_capture_get_orientation(graph,&orientation)); CHECK(orientation==orientations[flip]);
+        cc_request *request,*done; OK(cc_request_create(45,&request));
+        OK(cc_capture_queue(graph,request)); OK(cc_capture_dequeue(graph,&done,20));
+        CHECK(done==request && cc_request_get_status(done)==CC_REQUEST_COMPLETE);
+        OK(cc_capture_release(graph,done)); cc_capture_close(graph); OK(cc_request_destroy(request));
+        CHECK(f.opened==f.closed && !f.live_maps && !f.streaming);
+    }
+    const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB10_1X10,MEDIA_BUS_FMT_SGRBG10_1X10,
+        MEDIA_BUS_FMT_SGBRG10_1X10,MEDIA_BUS_FMT_SBGGR10_1X10};
+    struct fake f=fake_new(true,false); enable_orientation(&f,codes); f.orientation_rotation=90; f.orientation_flips=3;
+    cc_camera *camera=open_camera(&f);
+    cc_format format={.fourcc=V4L2_PIX_FMT_SRGGB10P,.width=64,.height=32};
+    enum cc_orientation orientation=CC_ORIENTATION_ROTATE_0;
+    OK(cc_camera_configure_oriented(camera,&format,&orientation));
+    CHECK(orientation==CC_ORIENTATION_ROTATE_90 && !f.orientation_flips && format.fourcc==V4L2_PIX_FMT_SRGGB10P);
+    close_camera(camera,&f);
+    /* Fixed read-only flips must be reported, rather than claiming a reset. */
+    f=fake_new(true,false); enable_orientation(&f,codes); f.orientation_read_only=true; f.orientation_flips=1;
+    camera=open_camera(&f); orientation=CC_ORIENTATION_ROTATE_0;
+    OK(cc_camera_configure_oriented(camera,&format,&orientation));
+    CHECK(orientation==CC_ORIENTATION_ROTATE_0_MIRROR && !f.orientation_writes && format.fourcc==V4L2_PIX_FMT_SGRBG10P);
+    close_camera(camera,&f);
+}
+
+static void test_oriented_failures(void)
+{
+    const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB10_1X10,MEDIA_BUS_FMT_SGRBG10_1X10,
+        MEDIA_BUS_FMT_SGBRG10_1X10,MEDIA_BUS_FMT_SBGGR10_1X10};
+    for (unsigned fault=0; fault<9; ++fault) {
+        struct fake f=fake_new(true,false); enable_orientation(&f,codes); f.orientation_rotation=180;
+        cc_camera *camera=open_camera(&f);
+        cc_format format={.fourcc=V4L2_PIX_FMT_SRGGB10P,.width=64,.height=32},saved=format;
+        enum cc_orientation orientation=CC_ORIENTATION_ROTATE_0;
+        int expected=EIO;
+        switch (fault) {
+        case 0: f.orientation_partial=true; break;
+        case 1: f.orientation_clamp=true; expected=ERANGE; break;
+        case 2: f.orientation_return_code=MEDIA_BUS_FMT_SBGGR12_1X12; expected=ENOTSUP; break;
+        case 3: f.orientation_return_code=MEDIA_BUS_FMT_Y10_1X10; expected=ENOTSUP; break;
+        case 4: f.fail_request=VIDIOC_QUERY_EXT_CTRL; break;
+        case 5: f.fail_request=VIDIOC_S_EXT_CTRLS; break;
+        case 6: f.fail_request=VIDIOC_SUBDEV_S_FMT; break;
+        case 7: f.fail_request=VIDIOC_S_FMT; break;
+        case 8: f.fail_request=VIDIOC_G_EXT_CTRLS; break;
+        }
+        f.fail_nth=1; f.fail_errno=EIO;
+        ERROR(cc_camera_configure_oriented(camera,&format,&orientation),expected);
+        CHECK(orientation==CC_ORIENTATION_ROTATE_0 && !memcmp(&format,&saved,sizeof(format)) && !camera->stream->configured);
+        f.orientation_partial=f.orientation_clamp=false; f.orientation_return_code=0; f.fail_request=0;
+        OK(cc_camera_configure_oriented(camera,&format,&orientation));
+        CHECK(f.orientation_flips==3 && format.fourcc==V4L2_PIX_FMT_SBGGR10P && camera->stream->configured);
+        close_camera(camera,&f);
+    }
+}
+
+static void test_oriented_frontend(void)
+{
+    const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB10_1X10,MEDIA_BUS_FMT_SGRBG10_1X10,
+        MEDIA_BUS_FMT_SGBRG10_1X10,MEDIA_BUS_FMT_SBGGR10_1X10};
+    for (int variant=0; variant<3; ++variant) for (uint32_t compression=0; compression<4; ++compression) {
+        struct fake f=frontend_fake(variant); enable_orientation(&f,codes); f.orientation_rotation=180;
+        struct cc_io io={&fake_ops,&f}; cc_camera_info info=camera_info(true); info.pipeline=CC_PIPELINE_RPI_CFE;
+        cc_cfe *fe; OK(cc_cfe_open_io(&info,&io,&fe));
+        enum cc_orientation orientation=CC_ORIENTATION_ROTATE_0; enum cc_transform transform;
+        OK(cc_cfe_try_orientation(fe,&orientation,&transform)); CHECK(transform==CC_TRANSFORM_ROTATE_180);
+        uint32_t other=(compression+1)%4;
+        cc_cfe_configuration configuration={
+            .sensor={.fourcc=V4L2_PIX_FMT_SRGGB10P,.width=64,.height=64},
+            .image={.fourcc=compression ? CC_FOURCC('P','C','0'+compression,'R'):V4L2_PIX_FMT_SRGGB16},
+            .image1={.fourcc=other ? CC_FOURCC('P','C','0'+other,'R'):V4L2_PIX_FMT_SRGGB12},
+            .crop={{0,0,64,48},{0,0,32,32}},
+            .downscale={{.xin=2,.xout=1,.yin=2,.yout=1}},
+            .compression_offset=compression ? 123:0,.compression_offset1=other ? 456:0
+        };
+        f.validation_only=true; cc_cfe_configuration predicted=configuration;
+        enum cc_orientation predicted_o=orientation;
+        OK(cc_cfe_try_configuration_oriented(fe,&predicted,&predicted_o));
+        CHECK(!f.orientation_writes && !f.orientation_flips && predicted_o==CC_ORIENTATION_ROTATE_0 &&
+            predicted.sensor.fourcc==V4L2_PIX_FMT_SBGGR10P && predicted.image.width==32 && predicted.image.height==24);
+        f.validation_only=false;
+        OK(cc_cfe_configure_oriented(fe,&configuration,&orientation));
+        CHECK(!memcmp(&configuration,&predicted,sizeof(configuration)));
+        CHECK(orientation==CC_ORIENTATION_ROTATE_0 && f.orientation_flips==3 && f.orientation_writes==2);
+        CHECK(configuration.sensor.fourcc==V4L2_PIX_FMT_SBGGR10P && configuration.image.width==32 && configuration.image.height==24);
+        CHECK(configuration.image1.width==32 && configuration.image1.height==32);
+        CHECK(configuration.image.fourcc==(compression ? CC_FOURCC('P','C','0'+compression,'B'):V4L2_PIX_FMT_SBGGR16));
+        CHECK(configuration.image1.fourcc==(other ? CC_FOURCC('P','C','0'+other,'B'):V4L2_PIX_FMT_SBGGR12));
+        uint32_t count=2; OK(cc_cfe_allocate_buffers(fe,&count));
+        cc_cfe_configuration saved=configuration;
+        enum cc_orientation requested=CC_ORIENTATION_ROTATE_180;
+        ERROR(cc_cfe_configure_oriented(fe,&configuration,&requested),EBUSY);
+        CHECK(requested==CC_ORIENTATION_ROTATE_180 && !memcmp(&saved,&configuration,sizeof(saved)) && f.orientation_writes==2);
+        cc_capture_devices devices={.frontend=fe}; cc_capture *graph; OK(cc_capture_create(&devices,&graph,&count));
+        OK(cc_capture_get_orientation(graph,&orientation)); CHECK(orientation==CC_ORIENTATION_ROTATE_0);
+        cc_request *request,*done; OK(cc_request_create(46,&request));
+        OK(cc_capture_queue(graph,request)); OK(cc_capture_dequeue(graph,&done,20));
+        CHECK(done==request && cc_request_get_status(done)==CC_REQUEST_COMPLETE);
+        CHECK(f.last_parameters.global.bayer_order==PISP_BAYER_ORDER_BGGR);
+        OK(cc_capture_release(graph,done)); cc_capture_close(graph); OK(cc_request_destroy(request));
+        CHECK(f.opened==f.closed && !f.live_maps && !f.streaming);
+    }
+    struct fake f=frontend_fake(2); enable_orientation(&f,codes); f.orientation_rotation=180;
+    struct cc_io io={&fake_ops,&f}; cc_camera_info info=camera_info(true); info.pipeline=CC_PIPELINE_RPI_CFE;
+    cc_cfe *fe; OK(cc_cfe_open_io(&info,&io,&fe));
+    cc_cfe_configuration c={.sensor={.fourcc=V4L2_PIX_FMT_SRGGB10P,.width=64,.height=64},
+        .image1={.fourcc=CC_FOURCC('P','C','3','R')}},saved=c;
+    enum cc_orientation orientation=CC_ORIENTATION_ROTATE_0;
+    f.fail_request=VIDIOC_S_FMT; f.fail_fd=FE_VIDEO_BASE+3; f.fail_nth=1; f.fail_errno=EIO;
+    ERROR(cc_cfe_configure_oriented(fe,&c,&orientation),EIO);
+    CHECK(!memcmp(&c,&saved,sizeof(c)) && orientation==CC_ORIENTATION_ROTATE_0 && f.orientation_flips==3);
+    uint32_t count=2; ERROR(cc_cfe_allocate_buffers(fe,&count),EPIPE);
+    f.fail_request=0; OK(cc_cfe_configure_oriented(fe,&c,&orientation));
+    CHECK(c.image.fourcc==V4L2_PIX_FMT_SBGGR16 && c.image1.fourcc==CC_FOURCC('P','C','3','B'));
+    cc_cfe_close(fe); CHECK(f.opened==f.closed && !f.live_maps);
+    const uint32_t mono[]={MEDIA_BUS_FMT_Y10_1X10,MEDIA_BUS_FMT_Y10_1X10,MEDIA_BUS_FMT_Y10_1X10,MEDIA_BUS_FMT_Y10_1X10};
+    f=frontend_fake(2); enable_orientation(&f,mono); f.orientation_rotation=180;
+    OK(cc_cfe_open_io(&info,&io,&fe));
+    c=(cc_cfe_configuration){.sensor={.fourcc=V4L2_PIX_FMT_Y10P,.width=64,.height=64},
+        .image1={.fourcc=CC_FOURCC('P','C','3','M')}};
+    orientation=CC_ORIENTATION_ROTATE_0; OK(cc_cfe_configure_oriented(fe,&c,&orientation));
+    CHECK(c.sensor.fourcc==V4L2_PIX_FMT_Y10P && c.image.fourcc==V4L2_PIX_FMT_Y16 &&
+        c.image1.fourcc==CC_FOURCC('P','C','3','M') && orientation==CC_ORIENTATION_ROTATE_0);
+    cc_cfe_close(fe); CHECK(f.opened==f.closed && !f.live_maps);
+}
+
+static void test_camera_identity_discovery(void)
+{
+    for (unsigned uvc=0; uvc<2; ++uvc) {
+        struct fake f=fake_new(!uvc,false);
+        f.identity_enabled=true; f.uvc_media=uvc!=0; f.uvc_v2=uvc!=0;
+        struct cc_io io={&fake_ops,&f}; cc_camera_info *list=NULL;
+        size_t count=0; OK(cc_enumerate_io(&io,&list,&count));
+        CHECK(count==(uvc ? 1U:2U) && f.opened==f.closed);
+        cc_camera_info saved=list[0];
+        CHECK(!strcmp(saved.id,uvc ? "/base/usb@0-2:1.0-046d:0825":"/base/camera@10"));
+        CHECK(saved.id_type==(uvc ? CC_CAMERA_ID_USB:CC_CAMERA_ID_FIRMWARE));
+        cc_camera_list_free(list);
+        cc_camera *camera=NULL;
+        OK(cc_camera_open_id_io(saved.id,&io,&camera));
+        CHECK(!strcmp(cc_camera_get_info(camera)->id,saved.id)); close_camera(camera,&f);
+        /* Cached paths must not silently open a replacement at the same node. */
+        f.identity_changed=true;
+        camera=(cc_camera *)(uintptr_t)1;
+        ERROR(cc_camera_open_io(&saved,&io,&camera),ESTALE);
+        CHECK(!camera && f.opened==f.closed);
+        f.identity_changed=false; f.identity_missing=true;
+        ERROR(cc_camera_open_io(&saved,&io,&camera),ENOTSUP); CHECK(!camera && f.opened==f.closed);
+        cc_camera_info by_path=saved; by_path.id[0]='\0';
+        OK(cc_camera_open_io(&by_path,&io,&camera)); CHECK(!cc_camera_get_info(camera)->id[0]); close_camera(camera,&f);
+        f.identity_missing=false;
+        f.identity_fault=true; list=(cc_camera_info *)(uintptr_t)1; count=17;
+        ERROR(cc_enumerate_io(&io,&list,&count),EIO); CHECK(!list && !count && f.opened==f.closed);
+        f.identity_fault=false;
+        /* Discover afresh after all device nodes have been renumbered. */
+        f.node_shift=10;
+        OK(cc_camera_open_id_io(saved.id,&io,&camera));
+        const cc_camera_info *actual=cc_camera_get_info(camera);
+        CHECK(!strcmp(actual->id,saved.id) && !strcmp(actual->video_path,"/dev/video10") && !strcmp(actual->media_path,"/dev/media10"));
+        if (!uvc) {
+            uint32_t slots=2; allocate(camera,&f);
+            cc_capture_devices devices={.camera=camera}; cc_capture *graph;
+            OK(cc_capture_create(&devices,&graph,&slots));
+            CHECK(!strcmp(cc_capture_get_info(graph)->id,saved.id));
+            cc_capture_close(graph); CHECK(f.opened==f.closed && !f.live_maps);
+        } else close_camera(camera,&f);
+        f.identity_empty_scan=true;
+        ERROR(cc_camera_open_id_io(saved.id,&io,&camera),ENOENT); CHECK(!camera && f.opened==f.closed);
+    }
+    struct fake f=fake_new(true,false); f.identity_enabled=true;
+    struct cc_io io={&fake_ops,&f}; cc_camera *camera=NULL;
+    f.identity_race=true;
+    ERROR(cc_camera_open_id_io("/base/camera@10",&io,&camera),ESTALE); CHECK(!camera && f.opened==f.closed);
+    f.identity_race=f.identity_changed=false; f.identity_duplicate=true;
+    cc_camera_info *list=(cc_camera_info *)(uintptr_t)1; size_t count=55;
+    ERROR(cc_enumerate_io(&io,&list,&count),ENOTUNIQ); CHECK(!list && !count && f.opened==f.closed);
+    f.identity_duplicate=false;
+    OK(cc_camera_open_id_io("/base/camera@11",&io,&camera));
+    CHECK(cc_camera_get_info(camera)->sensor_entity==3 && !strcmp(cc_camera_get_info(camera)->id,"/base/camera@11"));
+    close_camera(camera,&f);
+    f=frontend_fake(2); f.identity_enabled=true;
+    cc_cfe *fe=NULL; OK(cc_cfe_open_id_io("/base/camera@10",&io,&fe));
+    CHECK(!strcmp(cc_cfe_get_info(fe)->id,"/base/camera@10"));
+    cc_cfe_configuration c={.sensor={.fourcc=V4L2_PIX_FMT_SRGGB10P,.width=64,.height=64}};
+    OK(cc_cfe_configure(fe,&c)); uint32_t slots=2; OK(cc_cfe_allocate_buffers(fe,&slots));
+    cc_capture_devices devices={.frontend=fe}; cc_capture *graph;
+    OK(cc_capture_create(&devices,&graph,&slots));
+    CHECK(!strcmp(cc_capture_get_info(graph)->id,"/base/camera@10"));
+    cc_capture_close(graph); CHECK(f.opened==f.closed && !f.live_maps);
+    f=fake_new(false,false); f.identity_enabled=f.uvc_media=true;
+    ERROR(cc_cfe_open_id_io("/base/usb@0-2:1.0-046d:0825",&io,&fe),ENOTSUP); CHECK(!fe && f.opened==f.closed);
+    CHECK(!cc_cfe_get_info(NULL) && !cc_capture_get_info(NULL));
+}
+
+struct hotplug_fake {
+    struct fake *driver;
+    const char *missing;
+    struct cc_monitor_notice notice;
+    bool pending,ready,closed;
+    uint32_t retry;
+};
+static int hotplug_next(void *ctx,struct cc_monitor_notice *out)
+{
+    struct hotplug_fake *f=ctx;
+    if (!f->pending) return 0;
+    *out=f->notice; f->pending=false; return 1;
+}
+static int hotplug_ready(void *ctx,bool value) { ((struct hotplug_fake *)ctx)->ready=value; return 0; }
+static int hotplug_retry(void *ctx,uint32_t value) { ((struct hotplug_fake *)ctx)->retry=value; return 0; }
+static int hotplug_probe(void *ctx,const char *path,struct cc_node_token *token)
+{
+    struct hotplug_fake *f=ctx;
+    if (f->missing && !strcmp(path,f->missing)) return -ENOENT;
+    unsigned index=0,kind=0;
+    if (sscanf(path,"/dev/video%u",&index)==1) kind=1;
+    else if (sscanf(path,"/dev/media%u",&index)==1) kind=2;
+    else if (sscanf(path,"/dev/v4l-subdev%u",&index)==1) kind=3;
+    else CHECK(false);
+    if (index<f->driver->node_shift) return -ENOENT;
+    *token=(struct cc_node_token){kind*100U+index,kind*1000U+index}; return 0;
+}
+static int hotplug_wait(void *ctx,int timeout) { (void)ctx; (void)timeout; return -ETIMEDOUT; }
+static int hotplug_now(void *ctx,uint64_t *time) { (void)ctx; *time=0; return 0; }
+static void hotplug_close(void *ctx) { ((struct hotplug_fake *)ctx)->closed=true; }
+static const struct cc_monitor_backend_ops hotplug_ops={.next=hotplug_next,.ready=hotplug_ready,
+    .retry=hotplug_retry,.probe=hotplug_probe,.wait=hotplug_wait,.now=hotplug_now,.close=hotplug_close};
+static void hotplug_dispatch(cc_camera_monitor *m,struct hotplug_fake *f,enum cc_notice_type type,const char *path)
+{
+    f->notice=(struct cc_monitor_notice){.type=type};
+    if (path) strcpy(f->notice.path,path);
+    f->pending=true; OK(cc_camera_monitor_dispatch(m));
+}
+static size_t hotplug_snapshot(cc_camera_monitor *m,uint64_t *generation)
+{
+    cc_camera_info *list=NULL; size_t count=0;
+    OK(cc_camera_monitor_snapshot(m,&list,&count,generation)); cc_camera_list_free(list); return count;
+}
+static void hotplug_events(cc_camera_monitor *m,size_t count,enum cc_camera_event_type type)
+{
+    cc_camera_event event;
+    for (size_t i=0; i<count; ++i) {
+        OK(cc_camera_monitor_dequeue(m,&event,0)); CHECK(event.type==type);
+        CHECK(event.camera.id[0] && event.camera.media_path[0]);
+    }
+    ERROR(cc_camera_monitor_dequeue(m,&event,0),EAGAIN);
+}
+static void test_media_hotplug(void)
+{
+    for (unsigned kind=0; kind<3; ++kind) {
+        struct fake driver=kind==1 ? frontend_fake(2):fake_new(kind==0,false);
+        driver.identity_enabled=true;
+        driver.uvc_media=driver.uvc_v2=kind==2;
+        struct cc_io io={&fake_ops,&driver};
+        struct hotplug_fake f={.driver=&driver,.missing=kind==2 ? "/dev/video0":"/dev/v4l-subdev2"};
+        struct cc_monitor_backend backend={&hotplug_ops,&f,88};
+        cc_camera_monitor *m=NULL; OK(cc_camera_monitor_create_io(&io,&backend,&m));
+        uint64_t generation=0; CHECK(!hotplug_snapshot(m,&generation) && generation==1 && f.retry && !f.ready);
+        hotplug_events(m,0,CC_CAMERA_ADDED); CHECK(driver.opened==driver.closed);
+        f.missing=NULL; hotplug_dispatch(m,&f,CC_NOTICE_TIMER,NULL);
+        size_t count=hotplug_snapshot(m,&generation); CHECK(count==(kind==2 ? 1U:2U));
+        CHECK(generation==2 && f.ready); hotplug_events(m,count,CC_CAMERA_ADDED); CHECK(!f.ready);
+        /* Busy media/video opens are temporary; registered nodes remain live. */
+        driver.fail_open=true; OK(cc_camera_monitor_refresh(m)); CHECK(hotplug_snapshot(m,&generation)==count && generation==2);
+        hotplug_events(m,0,CC_CAMERA_ADDED); CHECK(f.retry);
+        driver.fail_open=false; driver.identity_empty_scan=true; OK(cc_camera_monitor_refresh(m));
+        CHECK(hotplug_snapshot(m,&generation)==count && generation==2 && f.retry); hotplug_events(m,0,CC_CAMERA_ADDED);
+        driver.identity_empty_scan=false; driver.identity_missing=true; OK(cc_camera_monitor_refresh(m));
+        CHECK(hotplug_snapshot(m,&generation)==count && generation==2); hotplug_events(m,0,CC_CAMERA_ADDED);
+        driver.identity_missing=false; driver.identity_fault=true;
+        ERROR(cc_camera_monitor_refresh(m),EIO); CHECK(hotplug_snapshot(m,&generation)==count && generation==2);
+        driver.identity_fault=false; OK(cc_camera_monitor_dispatch(m)); hotplug_events(m,0,CC_CAMERA_ADDED);
+        /* Deleting a bridge/FE child removes every camera registered through
+         * that media device, even though the image and sensor nodes remain. */
+        f.missing=kind==2 ? "/dev/video0":kind==1 ? "/dev/video4":"/dev/v4l-subdev2";
+        hotplug_dispatch(m,&f,CC_NOTICE_REMOVE,f.missing);
+        CHECK(!hotplug_snapshot(m,&generation) && generation==3); hotplug_events(m,count,CC_CAMERA_REMOVED);
+        const char *returned=f.missing; f.missing=NULL; hotplug_dispatch(m,&f,CC_NOTICE_CHANGE,returned);
+        CHECK(hotplug_snapshot(m,&generation)==count && generation==4); hotplug_events(m,count,CC_CAMERA_ADDED);
+        driver.node_shift=10; hotplug_dispatch(m,&f,CC_NOTICE_CHANGE,NULL);
+        CHECK(hotplug_snapshot(m,&generation)==count && generation==5);
+        cc_camera_event event;
+        for (size_t i=0; i<count; ++i) { OK(cc_camera_monitor_dequeue(m,&event,0)); CHECK(event.type==CC_CAMERA_REMOVED); }
+        for (size_t i=0; i<count; ++i) {
+            OK(cc_camera_monitor_dequeue(m,&event,0)); CHECK(event.type==CC_CAMERA_ADDED);
+            CHECK(!strcmp(event.camera.video_path,"/dev/video10") && !strcmp(event.camera.media_path,"/dev/media10"));
+        }
+        hotplug_events(m,0,CC_CAMERA_ADDED); cc_camera_monitor_close(m);
+        CHECK(f.closed && driver.opened==driver.closed && !driver.live_maps);
+    }
+}
+
+static void test_frontend_try_configuration(void)
+{
+    ERROR(cc_cfe_try_configuration(NULL,NULL),EINVAL);
+    for (int variant=0; variant<3; ++variant) {
+        struct fake f=frontend_fake(variant);
+        struct cc_io io={&fake_ops,&f}; cc_camera_info info=camera_info(true); info.pipeline=CC_PIPELINE_RPI_CFE;
+        cc_cfe *fe=NULL; OK(cc_cfe_open_io(&info,&io,&fe));
+        int initial_handles=f.opened-f.closed;
+        struct media_link_desc links[8]; memcpy(links,f.links,sizeof(links));
+        struct v4l2_mbus_framefmt sensor=f.sensor_active,mux=f.mux_active,frontend=f.fe_format;
+        cc_cfe_configuration wanted={.sensor={.fourcc=V4L2_PIX_FMT_SRGGB10P,.width=64,.height=64},
+            .image1={.fourcc=CC_FOURCC('P','C',(uint32_t)('1'+variant),'R')},.crop={{0},{8,8,48,48}},
+            .downscale={{0},{.xin=3,.xout=2,.yin=3,.yout=2}},.compression_offset1=2048};
+        f.validation_only=true; cc_cfe_configuration tried=wanted;
+        OK(cc_cfe_try_configuration(fe,&tried));
+        CHECK(tried.image.fourcc==V4L2_PIX_FMT_SRGGB16 && tried.image.width==64 && tried.image.height==64);
+        CHECK(tried.image1.width==32 && tried.image1.height==32 && tried.image1.planes[0].stride==64);
+        CHECK(tried.image1.planes[0].size==4096 && tried.statistics.planes[0].size==sizeof(struct pisp_statistics));
+        CHECK(!memcmp(f.links,links,sizeof(links)) && !memcmp(&f.sensor_active,&sensor,sizeof(sensor)) &&
+            !memcmp(&f.mux_active,&mux,sizeof(mux)) && !memcmp(&f.fe_format,&frontend,sizeof(frontend)));
+        for (size_t i=0; i<4; ++i) CHECK(!f.fe_nodes[i].format.fourcc);
+        CHECK(cc_cfe_fd(fe,CC_CFE_IMAGE1)==-ENOENT && f.opened-f.closed==initial_handles && f.try_formats>=4);
+        f.validation_only=false;
+        uint32_t slots=2; ERROR(cc_cfe_allocate_buffers(fe,&slots),EPIPE); /* TRY never configures. */
+        cc_cfe_configuration baseline={.sensor=wanted.sensor}; OK(cc_cfe_configure(fe,&baseline));
+        slots=2; OK(cc_cfe_allocate_buffers(fe,&slots));
+        sensor=f.sensor_active; mux=f.mux_active; frontend=f.fe_format; memcpy(links,f.links,sizeof(links));
+        cc_format native[4]; for (size_t i=0; i<4; ++i) native[i]=f.fe_nodes[i].format;
+        int opened=f.opened-f.closed, maps=f.live_maps;
+        f.validation_only=true;
+        tried=wanted; OK(cc_cfe_try_configuration(fe,&tried));
+        CHECK(f.opened-f.closed==opened && f.live_maps==maps && !memcmp(f.links,links,sizeof(links)));
+        CHECK(!memcmp(&f.sensor_active,&sensor,sizeof(sensor)) && !memcmp(&f.mux_active,&mux,sizeof(mux)) &&
+            !memcmp(&f.fe_format,&frontend,sizeof(frontend)));
+        for (size_t i=0; i<4; ++i) CHECK(!memcmp(&native[i],&f.fe_nodes[i].format,sizeof(native[i])));
+        for (unsigned stage=0; stage<7; ++stage) {
+            tried=wanted; cc_cfe_configuration saved=tried;
+            f.fail_request=stage<4 ? VIDIOC_TRY_FMT:VIDIOC_SUBDEV_S_FMT;
+            const int fds[]={FE_VIDEO_BASE,FE_VIDEO_BASE+3,FE_VIDEO_BASE+1,FE_VIDEO_BASE+2,SENSOR_FD,MUX_FD,FE_FD};
+            f.fail_fd=fds[stage]; f.fail_nth=1; f.fail_errno=EIO;
+            ERROR(cc_cfe_try_configuration(fe,&tried),EIO);
+            CHECK(!memcmp(&tried,&saved,sizeof(tried)) && f.opened-f.closed==opened && f.live_maps==maps);
+        }
+        f.fail_request=0;
+        f.validation_only=true; f.bad_try_pad=true; tried=wanted; cc_cfe_configuration saved=tried;
+        ERROR(cc_cfe_try_configuration(fe,&tried),EPROTO); CHECK(!memcmp(&tried,&saved,sizeof(tried)));
+        f.bad_try_pad=false;
+        f.fail_request=VIDIOC_QUERYCAP; f.fail_fd=FE_VIDEO_BASE+3; f.fail_nth=1; f.fail_errno=EIO;
+        tried=wanted; saved=tried; ERROR(cc_cfe_try_configuration(fe,&tried),EIO);
+        CHECK(!memcmp(&tried,&saved,sizeof(tried)) && f.opened-f.closed==opened && f.live_maps==maps);
+        f.fail_request=0; f.validation_only=false;
+        const struct cc_io *actual_io; cc_cfe_configuration actual; uint32_t actual_slots;
+        OK(cc_cfe_capture_info(fe,&actual_io,&actual,&actual_slots));
+        CHECK(!memcmp(&actual,&baseline,sizeof(actual)) && actual_slots==slots);
+        OK(cc_cfe_queue(fe,0,NULL,42));
+        f.validation_only=true; tried=wanted; OK(cc_cfe_try_configuration(fe,&tried));
+        CHECK(f.live_maps==maps && f.opened-f.closed==opened);
+        ERROR(cc_cfe_capture_info(fe,&actual_io,&actual,&actual_slots),EBUSY);
+        f.validation_only=false; cc_cfe_result result; OK(cc_cfe_dequeue(fe,&result,0));
+        CHECK(result.cookie==42 && result.image.planes[0].length==8192 && !result.image1.num_planes);
+        OK(cc_cfe_release(fe,result.index)); cc_cfe_close(fe); CHECK(f.opened==f.closed && !f.live_maps);
+    }
+}
+
+static void test_raw_role_configuration(void)
+{
+    for (unsigned kind=0;kind<2;++kind) for (unsigned rotated=0;rotated<3;++rotated) {
+        struct fake f=kind ? frontend_fake(2):fake_new(true,false); f.clean_frames=true;
+        if (rotated) {
+            const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB10_1X10,MEDIA_BUS_FMT_SGRBG10_1X10,
+                MEDIA_BUS_FMT_SGBRG10_1X10,MEDIA_BUS_FMT_SBGGR10_1X10};
+            if (rotated==2) {
+                const uint32_t mono[]={MEDIA_BUS_FMT_Y10_1X10,MEDIA_BUS_FMT_Y10_1X10,MEDIA_BUS_FMT_Y10_1X10,MEDIA_BUS_FMT_Y10_1X10};
+                enable_orientation(&f,mono);
+            } else enable_orientation(&f,codes);
+            f.orientation_rotation=180;
+        }
+        struct cc_io io={&fake_ops,&f}; cc_capture_devices d={0}; cc_camera_info info=camera_info(true);
+        if (kind) { info.pipeline=CC_PIPELINE_RPI_CFE; OK(cc_cfe_open_io(&info,&io,&d.frontend)); }
+        else OK(cc_camera_open_io(&info,&io,&d.camera));
+        enum cc_stream_role role=CC_ROLE_RAW; cc_pipeline_configuration c;
+        f.validation_only=true;
+        CHECK(cc_pipeline_generate_configuration(&d,&role,1,&c)>=0);
+        CHECK(c.num_streams==1 && c.streams[0].stream==CC_CAPTURE_RAW && c.buffer_count==2 &&
+            c.source_format.width==64 && c.source_format.height==(kind ? 64U:32U) &&
+            c.sensor_format.mbus_code==(rotated==2 ? MEDIA_BUS_FMT_Y10_1X10:rotated ? MEDIA_BUS_FMT_SBGGR10_1X10:MEDIA_BUS_FMT_SRGGB10_1X10) && !f.orientation_writes);
+        CHECK(c.streams[0].format.fourcc==(kind ? CC_FOURCC('P','C','1',rotated==2 ? 'M':rotated ? 'B':'R'):
+            rotated==2 ? V4L2_PIX_FMT_Y10P:rotated ? V4L2_PIX_FMT_SBGGR10P:V4L2_PIX_FMT_SRGGB10P));
+        CHECK(cc_pipeline_validate_configuration(&d,&c)==CC_CONFIGURATION_VALID);
+        cc_pipeline_configuration saved=c;
+        c.sensor=(cc_sensor_format){MEDIA_BUS_FMT_SRGGB12_1X12,64,32};
+        ERROR(cc_pipeline_validate_configuration(&d,&c),EINVAL); c=saved;
+        c.num_streams=2; c.streams[1]=c.streams[0]; ERROR(cc_pipeline_validate_configuration(&d,&c),EINVAL); c=saved;
+        enum cc_stream_role view=CC_ROLE_VIEWFINDER;
+        ERROR(cc_pipeline_generate_configuration(&d,&view,1,&c),ENOTSUP); CHECK(!memcmp(&saved,&c,sizeof(c)));
+        f.validation_only=false; CHECK(cc_pipeline_configure(&d,&c)>=0);
+        uint32_t slots=c.buffer_count;
+        if (kind) OK(cc_cfe_allocate_buffers(d.frontend,&slots)); else OK(cc_camera_allocate_buffers(d.camera,&slots));
+        f.validation_only=true; CHECK(cc_pipeline_validate_configuration(&d,&c)>=0);
+        saved=c; ERROR(cc_pipeline_configure(&d,&c),EBUSY); CHECK(!memcmp(&c,&saved,sizeof(c)));
+        f.validation_only=false;
+        cc_capture *capture=NULL; OK(cc_capture_create(&d,&capture,&slots)); CHECK(!d.camera && !d.frontend);
+        cc_request *request=NULL,*out=NULL; OK(cc_request_create(37,&request)); OK(cc_capture_queue(capture,request));
+        OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==request && cc_request_get_result(out)->status==CC_REQUEST_COMPLETE);
+        CHECK(cc_request_get_result(out)->raw.planes[0].length==c.streams[0].format.planes[0].size);
+        OK(cc_capture_release(capture,out)); cc_capture_close(capture); OK(cc_request_destroy(request));
+        CHECK(f.opened==f.closed && !f.live_maps);
+    }
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "proxy-feedback")) {
+        proxy_worker = argv[2]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
+        test_ipa_cfe_feedback();
+        puts("Isolated raw CFE IPA feedback, manual controls and request lifecycle passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"roles")) {
+        test_raw_role_configuration(); puts("Unicam/CFE raw role defaults, validation, allocation guards and adopted request capture passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"try-configuration")) {
+        test_frontend_try_configuration(); puts("CFE TRY layouts, active-state preservation, temporary ports and failure rollback passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"hotplug")) {
+        test_media_hotplug();
+        puts("Unicam/CFE/UVC media dependency settling, retention, removal, recovery and renumbering passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"identities")) {
+        test_camera_identity_discovery();
+        puts("Stable ID discovery/open, node renumbering, replacement guards, collisions and graph identities passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"orientation")) {
+        test_oriented_raw(); test_oriented_failures(); test_oriented_frontend();
+        puts("Oriented raw/CFE configuration, Bayer packing, dual outputs, requests and failure recovery passed"); return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"uvc")) {
         test_uvc_graph(false,false,false); test_uvc_graph(true,false,false);
         test_uvc_graph(false,true,false); test_uvc_graph(true,true,true); test_uvc_media_errors();

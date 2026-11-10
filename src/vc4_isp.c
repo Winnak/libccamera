@@ -201,7 +201,25 @@ static bool crop_valid(const cc_format *input, const cc_rectangle *crop)
            (uint64_t)(uint32_t)crop->y + crop->height <= input->height;
 }
 
-int cc_vc4_isp_configure(cc_vc4_isp *isp, cc_vc4_configuration *configuration)
+int cc_vc4_configuration_ready(cc_vc4_isp *isp)
+{
+    int ret=usable(isp); return ret<0 ? ret:allocated(isp) ? -EBUSY:0;
+}
+void cc_vc4_invalidate_configuration(cc_vc4_isp *isp) { if (isp) isp->configured=false; }
+int cc_vc4_isp_get_configuration(cc_vc4_isp *isp, cc_vc4_configuration *out)
+{
+    int ret=usable(isp); if (ret<0) return ret;
+    if (!out) return -EINVAL;
+    if (!isp->configured) return -EPIPE;
+    *out=isp->configuration; return 0;
+}
+
+static int negotiate_stream(cc_stream *stream, cc_format *format, bool active)
+{
+    return active ? cc_stream_configure(stream,format):cc_stream_try_format(stream,format);
+}
+
+static int negotiate_configuration(cc_vc4_isp *isp, cc_vc4_configuration *configuration, bool active)
 {
     int ret = usable(isp);
     if (ret < 0)
@@ -212,18 +230,18 @@ int cc_vc4_isp_configure(cc_vc4_isp *isp, cc_vc4_configuration *configuration)
         configuration->input.height > INT32_MAX || !configuration->output[0].width ||
         !configuration->output[0].height || !configuration->output[0].fourcc)
         return -EINVAL;
-    if (allocated(isp))
+    if (active && allocated(isp))
         return -EBUSY;
     cc_vc4_configuration c = *configuration;
     if ((c.crop.width || c.crop.height) && !crop_valid(&c.input, &c.crop))
         return -EINVAL;
-    isp->configured = false;
-    ret = cc_stream_configure(isp->streams[CC_VC4_INPUT], &c.input);
+    if (active) isp->configured = false;
+    ret = negotiate_stream(isp->streams[CC_VC4_INPUT], &c.input,active);
     if (ret < 0)
         return ret;
     if (!same_input(&configuration->input, &c.input))
         return -EPIPE;
-    ret = cc_stream_configure(isp->streams[CC_VC4_MAIN], &c.output[0]);
+    ret = negotiate_stream(isp->streams[CC_VC4_MAIN], &c.output[0],active);
     if (ret < 0)
         return ret;
     if (!c.output[1].fourcc && !c.output[1].width && !c.output[1].height) {
@@ -238,13 +256,13 @@ int cc_vc4_isp_configure(cc_vc4_isp *isp, cc_vc4_configuration *configuration)
             .colorspace = c.output[0].colorspace, .ycbcr_enc = c.output[0].ycbcr_enc,
             .quantization = c.output[0].quantization, .xfer_func = c.output[0].xfer_func };
     }
-    ret = cc_stream_configure(isp->streams[CC_VC4_LORES], &c.output[1]);
+    ret = negotiate_stream(isp->streams[CC_VC4_LORES], &c.output[1],active);
     if (ret < 0)
         return ret;
     if (c.output[1].width > c.output[0].width || c.output[1].height > c.output[0].height)
         return -EINVAL;
     c.statistics = (cc_format) { .fourcc = CC_VC4_STATISTICS };
-    ret = cc_stream_configure(isp->streams[CC_VC4_STATS], &c.statistics);
+    ret = negotiate_stream(isp->streams[CC_VC4_STATS], &c.statistics,active);
     if (ret < 0)
         return ret;
     if (c.statistics.fourcc != CC_VC4_STATISTICS)
@@ -253,15 +271,24 @@ int cc_vc4_isp_configure(cc_vc4_isp *isp, cc_vc4_configuration *configuration)
         c.crop = centered_crop(&c.input, &c.output[0]);
     if (!crop_valid(&c.input, &c.crop))
         return -EINVAL;
-    ret = cc_stream_set_selection(isp->streams[CC_VC4_INPUT], V4L2_SEL_TGT_CROP, 0, &c.crop);
-    if (ret < 0)
-        return ret;
+    if (active) {
+        ret = cc_stream_set_selection(isp->streams[CC_VC4_INPUT], V4L2_SEL_TGT_CROP, 0, &c.crop);
+        if (ret < 0) return ret;
+    }
     if (!crop_valid(&c.input, &c.crop))
         return -EPROTO;
-    isp->configuration = c;
-    isp->configured = true;
+    if (active) { isp->configuration = c; isp->configured = true; }
     *configuration = c;
     return 0;
+}
+
+int cc_vc4_isp_configure(cc_vc4_isp *isp, cc_vc4_configuration *configuration)
+{
+    return negotiate_configuration(isp,configuration,true);
+}
+int cc_vc4_isp_try_configuration(cc_vc4_isp *isp, cc_vc4_configuration *configuration)
+{
+    return negotiate_configuration(isp,configuration,false);
 }
 
 int cc_vc4_isp_stop(cc_vc4_isp *isp)

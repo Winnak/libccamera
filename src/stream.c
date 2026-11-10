@@ -141,6 +141,8 @@ int cc_stream_enum_format(cc_stream *stream, uint32_t index, cc_format_info *for
     ret = cc_ioctl(&stream->device->io, stream->device->fd, VIDIOC_ENUM_FMT, &desc);
     if (ret < 0)
         return ret == -EINVAL ? -ENOENT : ret;
+    if (desc.index != index || desc.type != (uint32_t)stream->type || !desc.pixelformat)
+        return -EPROTO;
     *format = (cc_format_info) { .fourcc = desc.pixelformat, .flags = desc.flags };
     cc_copy_string(format->description, sizeof(format->description),
                     (const char *)desc.description, sizeof(desc.description));

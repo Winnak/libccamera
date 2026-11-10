@@ -21,10 +21,19 @@ external porting reference, not a build or runtime dependency.
   VIMC Sensor B/debayer/scaler pipeline.
 
 Shared features include queued capture requests, MMAP/DMA-BUF buffers, native
-controls, read-only generic and Pi sensor-mode selection, sensor timing helpers
-and optional C IPA modules for exposure, white balance and autofocus. An opt-in calibrated
+controls, firmware/USB location IDs with ID-based opening, hotplug notifications,
+role-based configuration, read-only generic and Pi sensor-mode selection, sensor timing helpers
+and normalized camera properties (model, location, mounting rotation and sensor
+geometry), sensor orientation negotiation/flip application, plus optional C IPA
+modules for exposure, white balance and autofocus, including explicit
+[shared C module loading](docs/IPA.md#loading-shared-c-modules) and
+[directory discovery/selection](docs/IPA.md#discovering-and-selecting-modules). An opt-in calibrated
 OV5647/VC4 still profile is available; broader tuning and advanced algorithms
 remain pending.
+
+Native [IPC transport](docs/IPC.md) provides reference-compatible datagram and
+descriptor framing, namespace-isolated workers and C IPA callback proxies for
+current VC4/CFE/PiSP graphs and the existing VIMC mock IPA.
 
 ## Build and test
 
@@ -57,6 +66,18 @@ Choose the index reported by discovery. The [capture guide](docs/CAPTURE.md)
 covers capture, buffer ownership and queued requests. For still photographs
 with a Pi 4B and Camera Module v1.3, follow the
 [OV5647 bring-up and validation guide](docs/PI4_OV5647.md).
+
+The listing also reports camera IDs when available. Use `-I 'ID'` instead of
+`-c INDEX` to select by identity across device-node renumbering. See
+[camera identities](docs/CAPTURE.md#camera-identities) for their stability rules.
+Run `./build/ccamera-watch` to watch arrivals, changes and removals. The
+[hotplug monitor](docs/CAPTURE.md#camera-hotplug) integrates with caller-owned
+poll loops and preserves the library's libc-only dependency.
+Native CFE/VC4/PiSP configurations also support
+[read-only TRY validation](docs/CAPTURE.md#read-only-pipeline-validation) before
+applying formats or allocating buffers. The [stream-role layer](docs/CAPTURE.md#stream-roles)
+generates defaults, negotiates sensor/output formats and applies a complete plan
+to supplied devices; `ccamera-still` uses it for the OV5647 profile.
 
 The public API starts at [ccamera/ccamera.h](include/ccamera/ccamera.h), with
 complete examples in [examples/](examples/). To use an installed library:

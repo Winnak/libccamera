@@ -175,10 +175,29 @@ static bool same_layout(const cc_format *a, const cc_format *b)
     return true;
 }
 
-static int configure_output(cc_pisp_be *be, size_t port, cc_format *format)
+int cc_be_configuration_ready(cc_pisp_be *be)
+{
+    int ret=usable(be); return ret<0 ? ret:allocated(be) ? -EBUSY:0;
+}
+void cc_be_invalidate_configuration(cc_pisp_be *be) { if (be) be->configured=false; }
+uint32_t cc_be_hardware_version(const cc_pisp_be *be) { return be ? be->media->info.hw_revision:0; }
+int cc_pisp_be_get_configuration(cc_pisp_be *be, cc_pisp_be_configuration *out)
+{
+    int ret=usable(be); if (ret<0) return ret;
+    if (!out) return -EINVAL;
+    if (!be->configured) return -EPIPE;
+    *out=be->configuration; return 0;
+}
+
+static int negotiate_stream(cc_stream *stream, cc_format *format, bool active)
+{
+    return active ? cc_stream_configure(stream,format):cc_stream_try_format(stream,format);
+}
+
+static int configure_output(cc_pisp_be *be, size_t port, cc_format *format, bool active)
 {
     cc_format requested = *format;
-    int ret = cc_stream_configure(be->streams[port], format);
+    int ret = negotiate_stream(be->streams[port], format,active);
     if (ret < 0) return ret;
     cc_format adjusted = *format;
     ret = cc_pisp_prepare_output(&adjusted);
@@ -186,7 +205,7 @@ static int configure_output(cc_pisp_be *be, size_t port, cc_format *format)
     /* Some kernels widen chroma strides without growing the corresponding
      * allocation. Negotiate sufficient capacities using the returned strides. */
     if (!same_layout(format, &adjusted)) {
-        ret = cc_stream_configure(be->streams[port], &adjusted);
+        ret = negotiate_stream(be->streams[port], &adjusted,active);
         if (ret < 0) return ret;
         *format = adjusted;
     }
@@ -203,14 +222,14 @@ static int configure_output(cc_pisp_be *be, size_t port, cc_format *format)
     return 0;
 }
 
-int cc_pisp_be_configure(cc_pisp_be *be, cc_pisp_be_configuration *configuration)
+static int negotiate_configuration(cc_pisp_be *be, cc_pisp_be_configuration *configuration, bool active)
 {
     int ret = usable(be);
     if (ret < 0) return ret;
     if (!configuration || configuration->input.width < 16 || configuration->input.height < 16 ||
         configuration->input.width > UINT16_MAX || configuration->input.height > UINT16_MAX)
         return -EINVAL;
-    if (allocated(be)) return -EBUSY;
+    if (active && allocated(be)) return -EBUSY;
     cc_pisp_be_configuration c = *configuration;
     c.hardware_version = be->media->info.hw_revision;
     ret = cc_pisp_crop(&c.input, &c.crop[0], &c.crop[0]);
@@ -245,7 +264,7 @@ int cc_pisp_be_configure(cc_pisp_be *be, cc_pisp_be_configuration *configuration
     struct pisp_be_tiles_config parameters;
     ret = cc_pisp_be_build_configuration(&c, NULL, &parameters);
     if (ret < 0) return ret;
-    be->configured = false;
+    if (active) be->configured = false;
     if (c.output1.fourcc) {
         ret = open_port(be, CC_PISP_BE_OUTPUT1);
         if (ret < 0) return ret;
@@ -256,12 +275,12 @@ int cc_pisp_be_configure(cc_pisp_be *be, cc_pisp_be_configuration *configuration
         ret = open_port(be, i);
         if (ret < 0) return ret;
         cc_format requested = *format;
-        ret = cc_stream_configure(be->streams[i], format);
+        ret = negotiate_stream(be->streams[i], format,active);
         if (ret < 0) return ret;
         if (!same_layout(format, &requested)) return -EPIPE;
         *format = requested;
     }
-    ret = cc_stream_configure(be->streams[0], &c.input);
+    ret = negotiate_stream(be->streams[0], &c.input,active);
     if (ret < 0) return ret;
     const cc_format *source = &configuration->input;
     if (c.input.width != source->width || c.input.height != source->height || c.input.fourcc != source->fourcc ||
@@ -269,23 +288,40 @@ int cc_pisp_be_configure(cc_pisp_be *be, cc_pisp_be_configuration *configuration
         c.input.planes[0].size != source->planes[0].size)
         return -EPIPE;
     c.input = *source;
-    ret = configure_output(be, CC_PISP_BE_OUTPUT, &c.output);
+    ret = configure_output(be, CC_PISP_BE_OUTPUT, &c.output,active);
     if (ret < 0) return ret;
     if (c.output1.fourcc) {
-        ret = configure_output(be, CC_PISP_BE_OUTPUT1, &c.output1);
+        ret = configure_output(be, CC_PISP_BE_OUTPUT1, &c.output1,active);
         if (ret < 0) return ret;
     }
     ret = cc_pisp_be_build_configuration(&c, NULL, &parameters);
     if (ret < 0) return ret;
     c.parameters = (cc_format) { .fourcc = CC_BE_PARAMETERS };
-    ret = cc_stream_configure(be->streams[2], &c.parameters);
+    ret = negotiate_stream(be->streams[2], &c.parameters,active);
     if (ret < 0) return ret;
     if (c.parameters.fourcc != CC_BE_PARAMETERS || c.parameters.planes[0].size < sizeof(parameters))
         return -EPROTO;
-    be->configuration = c;
-    be->configured = true;
+    if (active) { be->configuration = c; be->configured = true; }
     *configuration = c;
     return 0;
+}
+
+int cc_pisp_be_configure(cc_pisp_be *be, cc_pisp_be_configuration *configuration)
+{
+    return negotiate_configuration(be,configuration,true);
+}
+int cc_pisp_be_try_configuration(cc_pisp_be *be, cc_pisp_be_configuration *configuration)
+{
+    int ret=usable(be);
+    if (ret<0) return ret;
+    uint32_t opened=0;
+    for (size_t i=0; i<8; ++i) if (be->streams[i]) opened|=1U<<i;
+    ret=negotiate_configuration(be,configuration,false);
+    for (size_t i=0; i<8; ++i) if (!(opened&(1U<<i)) && be->streams[i]) {
+        cc_stream_close(be->streams[i]); cc_video_close(be->devices[i]);
+        be->streams[i]=NULL; be->devices[i]=NULL;
+    }
+    return ret;
 }
 
 int cc_pisp_be_stop(cc_pisp_be *be)

@@ -3,6 +3,8 @@
 [Project overview](../README.md). Run example commands from the repository root.
 
 - [C IPA modules and automatic controls](#c-ipa-modules-and-automatic-controls)
+- [Loading shared C modules](#loading-shared-c-modules)
+- [Discovering and selecting modules](#discovering-and-selecting-modules)
 - [OV5647 VC4 still profile](#ov5647-vc4-still-profile)
 - [Autofocus and lens control](#autofocus-and-lens-control)
 
@@ -10,7 +12,8 @@
 
 [include/ccamera/ipa.h](../include/ccamera/ipa.h) defines a versioned C module ABI and
 an explicit reference AE/AGC/AWB controller with optional RPi autofocus. `cc_capture_set_ipa` configures and
-adopts a module on an idle stopped graph with a statistics port. Success clears
+adopts a module on an idle stopped graph with a statistics port, or the existing
+VIMC graph with its mock IPA. Success clears
 the caller's module pointer; failure retains caller ownership. NULL detaches and
 destroys the previous module. The graph calls configure/start on startup and
 restart, prepare before capture, process after successful frame completion, and
@@ -76,9 +79,140 @@ above. The examples print exposure/gain, histogram mean and white-balance metada
 The exposure/white-balance controller is a basic reference, not a calibrated camera profile.
 Bayesian AWB, flicker/HDR policies, long-exposure planning and sensor-specific
 colour/black-level/lens-shading/gamma tuning remain pending. The C ABI supports
-caller-registered module callbacks; upstream C++ IPA binaries need a bridge, and
-module loading, IPC and process isolation are not implemented. Simulations prove
+caller-registered and explicitly loaded shared C modules; upstream C++ IPA binaries
+need a bridge. Directory discovery and pipeline/version selection are available;
+the [IPC worker/proxy](IPC.md) supports isolated C modules and built-in controllers
+on the current VC4/CFE/PiSP graphs and the existing VIMC mock. Signature
+verification remains pending. Simulations prove
 feedback and lifecycle behavior, not physical image quality.
+
+## Loading shared C modules
+
+[include/ccamera/ipa_module.h](../include/ccamera/ipa_module.h) provides explicit
+ELF inspection and loading for the native C IPA ABI. `cc_ipa_module_open` reads
+metadata without calling `dlopen` or running constructors. It checks the native
+ELF class, byte order and architecture, bounded symbol/section extents, both API
+versions and terminated printable names. Module files are limited to 64 MiB.
+`cc_ipa_module_match` compares the exact pipeline name and an inclusive pipeline
+version interval. Pipeline names and versions are contracts between the module
+and its application; the factory/configure callback must also reject unsupported
+configurations.
+
+```c
+#include <ccamera/ipa_module.h>
+#include <ccamera/capture.h>
+#include <errno.h>
+
+int enable_shared_ipa(cc_capture *capture, const char *path)
+{
+    cc_ipa_module *module = NULL;
+    cc_ipa *ipa = NULL;
+    int ret = cc_ipa_module_open(path, &module);
+    if (ret < 0) return ret;
+    ret = cc_ipa_module_match(module, "rpi/vc4", 1, 1);
+    if (ret == 0) ret = -ENOENT;
+    else if (ret > 0) ret = cc_ipa_module_create(module, NULL, 0, &ipa);
+    cc_ipa_module_close(module); /* An instantiated IPA holds its own reference. */
+    if (!ret) ret = cc_capture_set_ipa(capture, &ipa);
+    cc_ipa_destroy(ipa); /* NULL after adoption; otherwise still caller-owned. */
+    return ret;
+}
+```
+
+The first create loads the absolute module path using `RTLD_NOW | RTLD_LOCAL`.
+Relative `$ORIGIN` dependencies retain normal dynamic-linker behavior. Subsequent
+instances share the loaded object and have independent contexts. The loader
+detects changes/replacement since inspection and checks the loaded descriptor
+again. Linux `/proc/self/maps` checks the mapped inode, so an older image cached
+by the dynamic linker cannot satisfy a newly inspected replacement. Do not modify
+the module or its dependencies concurrently. The object remains loaded until
+the caller closes its handle and every instance has finished
+its stop/destroy callbacks, including instances adopted by capture graphs.
+Factory failures and malformed callback tables publish no IPA handle; successful
+factory contexts are destroyed when later validation fails.
+
+A shared module exports two symbols with default visibility and C linkage:
+
+- A const `cc_ipa_module_info` object named `cc_ipa_module_descriptor`. Set
+  `module_api_version = CC_IPA_MODULE_API_VERSION`,
+  `ipa_abi_version = CC_IPA_ABI_VERSION`, a pipeline version and both names.
+- A function named `cc_ipa_module_create_v1` matching `cc_ipa_module_factory`.
+  It checks the host ABI and table size, fills the supplied `cc_ipa_ops`, and
+  returns its context. Module-defined tuning bytes are borrowed for this call.
+  On every nonzero return the factory retains responsibility for cleanup.
+  After success, the ordinary IPA callback and destroy rules apply.
+
+These modules execute trusted code in the calling process. The optional
+`.sign` sidecar beside the resolved module is copied as opaque bytes (up to 1 MiB),
+available through `cc_ipa_module_get_signature`; it is not verified. Missing or unreadable signatures
+are empty. Direct module loading does not search directories. No automatic fallback,
+trust policy or sandbox is implied. C++ libcamera IPA binaries use a different interface. A module calling
+other libccamera APIs must link those symbols normally; a statically linked host
+does not automatically export its library symbols to plugins.
+
+## Discovering and selecting modules
+
+[include/ccamera/ipa_manager.h](../include/ccamera/ipa_manager.h) discovers a module
+snapshot without loading code. `cc_ipa_manager_open(NULL, &manager)` searches
+`CCAMERA_IPA_MODULE_PATH` (colon-separated), a detected uninstalled build's `ipa/`
+directory, then the configured installation directory, normally
+`${CMAKE_INSTALL_FULL_LIBDIR}/ccamera/ipa`. Empty environment
+components are skipped, including leading/trailing colons. Environment paths are
+ignored when Linux reports `AT_SECURE` or the real/effective user or group IDs
+differ. Installation lookup can be set with CMake's `CCAMERA_IPA_MODULE_DIR`.
+
+Explicit options place caller directories first, followed by environment,
+build-tree and installation sources only when their flags are enabled. Build-tree
+lookup uses `CC_IPA_MANAGER_BUILD_TREE` and recurses to depth 2. It identifies the
+active library/executable image and the generated `.ccamera-build-tree` marker
+beside it. CMake does not install the marker. Image-relative paths support moved
+build trees, symlink launches and changes of working directory; Linux mapped-image
+lookup avoids resolving relative loader names against a new working directory.
+Programs statically linked outside this build layout can supply explicit
+directories instead. Lookup does not require RPATH. Nested real directories are traversed
+up to the requested depth; nested symlink directories are skipped. `.so` file symlinks are
+accepted. Each directory's complete candidate list is sorted before metadata
+inspection, preserving directory priority. Duplicate candidates/aliases retain
+their ordering. Missing/inaccessible directories and invalid modules are skipped;
+resource, traversal and limit failures abort construction with a NULL manager.
+
+```c
+#include <ccamera/ipa_manager.h>
+#include <ccamera/capture.h>
+
+cc_ipa_module_directory directories[] = {{ "/opt/camera/ipa", 0 }};
+cc_ipa_manager_options options = {
+    .directories = directories, .num_directories = 1,
+    .flags = CC_IPA_MANAGER_INSTALLED, .max_modules = 32
+};
+cc_ipa_manager *manager = NULL;
+int ret = cc_ipa_manager_open(&options, &manager);
+if (ret < 0) return ret;
+cc_ipa *ipa = NULL;
+ret = cc_ipa_manager_create(manager, "rpi/vc4", 1, 1, NULL, NULL, 0, &ipa);
+cc_ipa_manager_close(manager); /* The created IPA retains its module. */
+if (!ret) ret = cc_capture_set_ipa(capture, &ipa);
+cc_ipa_destroy(ipa);
+```
+
+Selection follows the archived reference: the **first** exact pipeline name and
+inclusive version match wins. It does not choose the highest version. An optional
+metadata name narrows selection; `cc_ipa_manager_select` returns the index for
+inspection before loading, and indexed getters expose metadata, canonical paths
+and opaque signature bytes. Factory/link failures from the selected module are
+returned directly, without trying lower-priority modules. Reopen the manager to
+discover filesystem changes; existing IPA instances keep their code after the
+manager closes. Created IPAs use the same capture adoption/restart/cancellation
+lifecycle as directly loaded modules. Creation loads trusted in-process code;
+the manager does not verify signatures. Use `cc_ipa_manager_create_proxy` from
+`ccamera/ipa_proxy.h` for a separate worker with user/network namespaces; see
+[isolated C IPAs](IPC.md#isolated-c-ipas).
+
+Discovery is bounded to 64 search directories, depth 8, 4096 candidates, 65536
+directory entries and at most 256 valid modules (or a lower `max_modules`). The
+environment text limit is 64 KiB. Exceeding search limits returns `-E2BIG` and
+cleans up the entire partial snapshot. Explicit argument-range errors return
+`-EINVAL`. No threads or background rescans are created.
 
 ## OV5647 VC4 still profile
 

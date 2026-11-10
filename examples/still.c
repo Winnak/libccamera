@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <ccamera/capture.h>
+#include <ccamera/configuration.h>
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
@@ -35,21 +36,6 @@ static int number(const char *s, uint32_t *n)
         return -EINVAL;
     *n = (uint32_t)v;
     return 0;
-}
-static uint32_t bayer(uint32_t code)
-{
-    switch (code) {
-    case MEDIA_BUS_FMT_SBGGR10_1X10:
-        return V4L2_PIX_FMT_SBGGR10P;
-    case MEDIA_BUS_FMT_SGBRG10_1X10:
-        return V4L2_PIX_FMT_SGBRG10P;
-    case MEDIA_BUS_FMT_SGRBG10_1X10:
-        return V4L2_PIX_FMT_SGRBG10P;
-    case MEDIA_BUS_FMT_SRGGB10_1X10:
-        return V4L2_PIX_FMT_SRGGB10P;
-    default:
-        return 0;
-    }
 }
 static int write_payload(FILE *out, const cc_frame *frame)
 {
@@ -107,7 +93,7 @@ static int disable_auto(cc_camera *camera)
 static int metadata(const char *path, const struct row *rows, size_t n, const cc_sensor_trace *trace,
                     size_t traces, uint64_t dropped, const cc_format *raw, const cc_format *rgb,
                     const cc_sensor_geometry *geometry, const uint32_t delays[4], const char *diagnostic,
-                    int status, const cc_sensor_timing *timing)
+                    int status, const cc_sensor_timing *timing, enum cc_orientation orientation)
 {
     if (!path)
         return 0;
@@ -123,10 +109,12 @@ static int metadata(const char *path, const struct row *rows, size_t n, const cc
     fprintf(out,
             "{\"type\":\"configuration\",\"profile\":\"%s\",\"diagnostic\":\"%s\",\"status\":%d,\"raw_"
             "fourcc\":%u,\"width\":%u,\"height\":%u,\"raw_stride\":%u,\"rgb_stride\":%u,\"crop\":[%d,%d,%u,%"
-            "u],\"delays\":[%u,%u,%u,%u],\"trace_dropped\":%" PRIu64 "}\n",
+            "u],\"delays\":[%u,%u,%u,%u],\"trace_dropped\":%" PRIu64
+            ",\"orientation\":%u,\"hflip\":%u,\"vflip\":%u}\n",
             cc_vc4_ov5647_profile_id(), diagnostic ? diagnostic : "", status, raw->fourcc, raw->width,
             raw->height, raw->planes[0].stride, rgb->planes[0].stride, geometry->crop.x, geometry->crop.y,
-            geometry->crop.width, geometry->crop.height, delays[0], delays[1], delays[2], delays[3], dropped);
+            geometry->crop.width, geometry->crop.height, delays[0], delays[1], delays[2], delays[3], dropped,
+            (unsigned)orientation, geometry->hflip, geometry->vflip);
     for (size_t i = 0; i < n; ++i) {
         const struct row *r = &rows[i];
         const cc_ipa_metadata *m = &r->ipa;
@@ -158,19 +146,20 @@ static int metadata(const char *path, const struct row *rows, size_t n, const cc
 }
 static void usage(void)
 {
-    puts("ccamera-still [-c INDEX] [-o photo.ppm] [--metadata run.jsonl] [--raw frame.raw]\n"
+    puts("ccamera-still [-c INDEX | -I ID] [-o photo.ppm] [--metadata run.jsonl] [--raw frame.raw]\n"
          "  [--statistics frame.bsta] [--flicker off|50|60] [--timeout-ms 10000]\n"
          "  [--shutter-us N] [--gain-code N] [--colour-gains R,B]\n"
          "  [--exposure-delay N] [--gain-delay N] [--vblank-delay N] [--hblank-delay N]\n"
          "  [--diagnostic exposure|gain|vblank --frames 96]\n"
          "Standard colour OV5647 on Pi 4/earlier only. Uses full-resolution mode.\n"
          "Diagnostics use fixed illumination and settings; logs are written after capture.\n"
-         "Run ccamera-capture -l to choose the discovery index.");
+         "Run ccamera-capture -l to choose a discovery index or camera ID.");
 }
 int main(int argc, char **argv)
 {
     enum { FLICKER = 256, TIMEOUT, SHUTTER, GAIN, WB, ED, GD, VD, HD, META, RAW, STATS, DIAG, FRAMES, HELP };
     const struct option opts[] = {{"flicker", 1, 0, FLICKER},
+                                  {"camera-id", 1, 0, 'I'},
                                   {"timeout-ms", 1, 0, TIMEOUT},
                                   {"shutter-us", 1, 0, SHUTTER},
                                   {"gain-code", 1, 0, GAIN},
@@ -188,14 +177,17 @@ int main(int argc, char **argv)
                                   {0, 0, 0, 0}};
     uint32_t index = 0, timeout = 10000, shutter = 0, gain = 0, delays[4] = {2, 2, 2, 2}, frames = 96;
     cc_ipa_vc4_options tuning = {.mains_hz = 50};
+    bool index_selected=false;
     const char *output = "photo.ppm", *meta = "capture.jsonl", *raw_path = NULL, *stats_path = NULL,
-               *diagnostic = NULL;
+               *diagnostic = NULL, *camera_id=NULL;
     int opt, ret = 0;
-    while ((opt = getopt_long(argc, argv, "c:o:h", opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:I:o:h", opts, NULL)) != -1) {
         switch (opt) {
         case 'c':
+            index_selected=true;
             ret = number(optarg, &index);
             break;
+        case 'I': camera_id=optarg; break;
         case 'o':
             output = optarg;
             break;
@@ -250,7 +242,8 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-    if (optind != argc || !timeout || timeout > 3600000 || frames < 32 || frames > 256 ||
+    if (optind != argc || (camera_id && (index_selected || !camera_id[0] ||
+        strnlen(camera_id,CC_CAMERA_ID_MAX)==CC_CAMERA_ID_MAX)) || !timeout || timeout > 3600000 || frames < 32 || frames > 256 ||
         (diagnostic && strcmp(diagnostic, "exposure") && strcmp(diagnostic, "gain") &&
          strcmp(diagnostic, "vblank"))) {
         usage();
@@ -289,25 +282,25 @@ int main(int argc, char **argv)
     size_t trace_count = 0;
     uint64_t trace_dropped = 0;
     cc_format raw = {0};
+    enum cc_orientation orientation=CC_ORIENTATION_ROTATE_0;
     cc_vc4_configuration config = {0};
     cc_sensor_geometry geometry = {0};
     cc_sensor_timing timing = {0};
-    ret = cc_enumerate(&list, &count);
-    if (ret < 0)
-        goto done;
-    if (index >= count) {
-        ret = -ENODEV;
-        goto done;
+    if (camera_id) ret=cc_camera_open_by_id(camera_id,&camera);
+    else {
+        ret=cc_enumerate(&list,&count);
+        if (ret<0) goto done;
+        if (index>=count) { ret=-ENODEV; goto done; }
+        ret=cc_camera_open(&list[index],&camera);
     }
-    fprintf(stderr, "camera=%s driver=%s media=%s video=%s\n", list[index].name, list[index].driver,
-            list[index].media_path, list[index].video_path);
-    if (list[index].pipeline != CC_PIPELINE_RPI_UNICAM) {
+    if (ret<0) goto done;
+    const cc_camera_info *source=cc_camera_get_info(camera);
+    fprintf(stderr,"camera=%s driver=%s media=%s video=%s id=%s\n",source->name,source->driver,
+            source->media_path,source->video_path,source->id[0] ? source->id:"(unavailable)");
+    if (source->pipeline != CC_PIPELINE_RPI_UNICAM) {
         ret = -ENOTSUP;
         goto done;
     }
-    ret = cc_camera_open(&list[index], &camera);
-    if (ret < 0)
-        goto done;
     const cc_sensor_model *model;
     ret = cc_camera_get_sensor(camera, &model);
     if (ret < 0)
@@ -324,10 +317,28 @@ int main(int argc, char **argv)
     ret = cc_camera_select_sensor_mode(camera, &mode_request, &selected);
     if (ret < 0)
         goto done;
-    raw = (cc_format){.fourcc = bayer(selected.mbus_code), .width = selected.width, .height = selected.height};
-    ret = cc_camera_configure(camera, &raw);
+    ret = cc_vc4_isp_open(NULL, &isp);
     if (ret < 0)
         goto done;
+    cc_capture_devices planned_devices = {.camera = camera, .vc4 = isp};
+    const enum cc_stream_role roles[] = {CC_ROLE_RAW, CC_ROLE_STILL_CAPTURE};
+    cc_pipeline_configuration pipeline;
+    ret = cc_pipeline_generate_configuration(&planned_devices, roles, 2, &pipeline);
+    if (ret < 0)
+        goto done;
+    pipeline.sensor = selected; /* Require the calibrated full-resolution mode. */
+    pipeline.streams[0].sensor_bit_depth = 10;
+    pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24, .width = 2592, .height = 1944};
+    pipeline.orientation = orientation;
+    ret = cc_pipeline_configure(&planned_devices, &pipeline);
+    if (ret < 0)
+        goto done;
+    raw = pipeline.source_format;
+    orientation = pipeline.applied_orientation;
+    ret = cc_vc4_isp_get_configuration(isp, &config);
+    if (ret < 0)
+        goto done;
+    fprintf(stderr,"orientation=%u (EXIF), raw_fourcc=0x%08x\n",(unsigned)orientation,raw.fourcc);
     if (raw.width != 2592 || raw.height != 1944) {
         ret = -EPROTO;
         goto done;
@@ -343,14 +354,6 @@ int main(int argc, char **argv)
         goto done;
     cc_sensor_timing_limits limits;
     ret = cc_camera_get_sensor_timing_limits(camera, &limits);
-    if (ret < 0)
-        goto done;
-    ret = cc_vc4_isp_open(NULL, &isp);
-    if (ret < 0)
-        goto done;
-    config = (cc_vc4_configuration){
-        .input = raw, .output = {{.fourcc = V4L2_PIX_FMT_RGB24, .width = raw.width, .height = raw.height}}};
-    ret = cc_vc4_isp_configure(isp, &config);
     if (ret < 0)
         goto done;
     uint32_t n = 4;
@@ -573,7 +576,7 @@ done:
         ret = -EIO;
     {
         int logged = metadata(meta, rows, row_count, traces, trace_count, trace_dropped, &raw,
-                              &config.output[0], &geometry, delays, diagnostic, ret, &timing);
+                              &config.output[0], &geometry, delays, diagnostic, ret, &timing, orientation);
         if (!ret)
             ret = logged;
     }

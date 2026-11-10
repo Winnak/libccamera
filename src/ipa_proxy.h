@@ -1,0 +1,15 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+#ifndef CCAMERA_IPA_PROXY_INTERNAL_H
+#define CCAMERA_IPA_PROXY_INTERNAL_H
+#include "ipa_module.h"
+#include "ipa_message.h"
+
+enum cc_ipa_proxy_command {
+    CC_IPA_PROXY_INIT = 1, CC_IPA_PROXY_CONFIGURE, CC_IPA_PROXY_START, CC_IPA_PROXY_STOP,
+    CC_IPA_PROXY_PREPARE, CC_IPA_PROXY_PROCESS, CC_IPA_PROXY_DESTROY,
+    CC_IPA_PROXY_VIMC_MAP = 100, CC_IPA_PROXY_VIMC_UNMAP, CC_IPA_PROXY_VIMC_QUEUE,
+    CC_IPA_PROXY_VIMC_COMPUTE, CC_IPA_PROXY_VIMC_PARAMS
+};
+enum cc_ipa_proxy_kind { CC_IPA_PROXY_MODULE = 1, CC_IPA_PROXY_REFERENCE, CC_IPA_PROXY_VC4, CC_IPA_PROXY_VC4_DEFAULT, CC_IPA_PROXY_VIMC };
+struct cc_ipa_proxy_init { uint32_t protocol, abi, kind; };
+#endif

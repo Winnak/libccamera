@@ -26,7 +26,7 @@ target_compile_options(ccamera-fuzz-support PRIVATE
     -g -O1 -fno-omit-frame-pointer -fno-sanitize-recover=all
     -fsanitize=fuzzer-no-link,address,undefined)
 
-foreach(name pisp cfe sensor delayed stream controls media ipa af embedded routing buffers fences uvc)
+foreach(name pisp cfe sensor delayed stream controls media ipa ipa_module ipa_manager ipc ipa_wire af embedded routing buffers fences uvc monitor configuration)
     set(target ccamera-fuzz-${name})
     add_executable(${target} fuzz_${name}.c)
     ccamera_compile_settings(${target})
@@ -41,10 +41,14 @@ foreach(name pisp cfe sensor delayed stream controls media ipa af embedded routi
     # checked-in seed corpus. A fresh writable corpus is not required each run.
     file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/corpus/${name}"
                         "${CMAKE_CURRENT_BINARY_DIR}/artifacts/${name}")
+    set(max_len 4096)
+    if(name STREQUAL "ipa_wire")
+        set(max_len 65536)
+    endif()
     add_test(NAME fuzz-${name}-smoke COMMAND ${target}
         "${CMAKE_CURRENT_BINARY_DIR}/corpus/${name}"
         "${CMAKE_CURRENT_SOURCE_DIR}/corpus/${name}"
-        -runs=1000 -seed=1 -max_len=4096 -timeout=5 -rss_limit_mb=512
+        -runs=1000 -seed=1 -max_len=${max_len} -timeout=5 -rss_limit_mb=512
         "-artifact_prefix=${CMAKE_CURRENT_BINARY_DIR}/artifacts/${name}/")
     set_tests_properties(fuzz-${name}-smoke PROPERTIES LABELS fuzz TIMEOUT 60)
 endforeach()

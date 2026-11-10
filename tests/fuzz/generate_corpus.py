@@ -17,6 +17,39 @@ def seed(target, name, data):
     (directory / name).write_bytes(data)
 
 
+for size in [0, 1, 8, 65536, 65537, 0xFFFFFFFF]:
+    for fds in [0, 1, 253, 254, 255]:
+        seed("ipc", f"header-{size}-{fds}", pack("IBBBB", size, fds, 0, 0, 0))
+for mode in [0, 1, 2, 3]:
+    seed("ipc", f"ancillary-{mode}", bytes([mode]) + pack("IBBBBBH", 64, 1, 0, 0, 0, 0, 253) + bytes(1024))
+seed("ipc", "pidfd-ancillary-64", pack("Qiii", 20, 1, 4, 3) + bytes(4))
+seed("ipc", "pidfd-ancillary-32", pack("Iiii", 16, 1, 4, 3))
+
+
+for offset in [0, 4, 16, 40, 128, 192, 256, 512, 536, 640, 768, 780, 1036, 1536, 2047]:
+    seed("ipa_module", f"patch-{offset}", bytes([1]) + pack("IB", offset, 7) + bytes(8))
+seed("ipa_module", "valid", bytes([0]))
+seed("ipa_module", "truncated", bytes([8, 255, 3]))
+for mode in [0, 1, 2, 3, 4, 5, 7, 8, 16, 32, 64, 65, 67]:
+    seed("ipa_manager", f"mode-{mode}", bytes([mode]) + b":/priority::/second:")
+seed("ipa_manager", "too-many-directories", bytes([1]) + b"/x:" * 65)
+
+for flags in [0, 1, 2, 4, 8, 16, 32, 64]:
+    data = bytes([flags, 3, 3]) + pack("II", 640, 480) * 4 + bytes([1, 1])
+    for role in [0, 1, 2]:
+        data += bytes([role, 0]) + pack("III", 1920, 1080, 4)
+    seed("configuration", f"flags-{flags}", data)
+
+for action in ["add", "remove", "change", "bind", "unbind"]:
+    for subsystem, node in [("video4linux", "video7"), ("media", "media2")]:
+        packet = f"{action}@/devices/test\0ACTION={action}\0DEVPATH=/devices/test\0SUBSYSTEM={subsystem}\0DEVNAME={node}\0"
+        seed("monitor", f"{action}-{subsystem}", b"\0" + packet.encode())
+for mask in [0x100, 0x200, 0x40, 0x80, 0x4, 0x4000, 0x8000]:
+    seed("monitor", f"inotify-{mask:x}", b"\x01" + pack("iIII", 0, mask, 0, 8) + b"video7\0\0")
+for node in [b"video0", b"v4l-subdev999", b"../video0", b"media", b"media2/child", b"media42"]:
+    seed("monitor", f"node-{node.hex()}", b"\x02" + node)
+
+
 for af_mode in [0, 1, 2, 4, 6]:
     seed("af", f"mode-{af_mode}", bytes([af_mode, 63]) + bytes(range(256)) * 3)
 

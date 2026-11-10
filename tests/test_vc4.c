@@ -1,9 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "internal.h"
+#include <ccamera/ipa_proxy.h>
 #include "subdev_compat.h"
 #include "request_buffers.h"
 #include "fence.h"
 #include <ccamera/capture.h>
+#include <ccamera/configuration.h>
+#include <ccamera/ipa_module.h>
+#include <ccamera/ipa_manager.h>
 #include <ccamera/linux/bcm2835-isp.h>
 
 #include <errno.h>
@@ -18,6 +22,19 @@
 #include <string.h>
 #include "media_v2_driver.h"
 
+static const char *proxy_worker;
+static int create_reference(const cc_ipa_reference_tuning *tuning, cc_ipa **ipa)
+{
+    if (!proxy_worker) return cc_ipa_reference_create(tuning, ipa);
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker};
+    return cc_ipa_reference_create_proxy(tuning, &options, ipa);
+}
+static int proxy_available(void)
+{
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker}; cc_ipa *ipa = NULL;
+    int ret = cc_ipa_vc4_create_proxy(NULL, &options, &ipa); cc_ipa_destroy(ipa);
+    return ret == -ENOSYS || ret == -EPERM || ret == -EACCES ? 77 : ret;
+}
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 #define OK(x) CHECK((x) == 0)
 #define ERROR(x, e) CHECK((x) == -(e))
@@ -46,6 +63,9 @@ struct node {
     struct buffer chroma[SLOTS][2];
 };
 struct fake {
+    bool validation_only;
+    bool physical_array_larger, unicam;
+    unsigned try_formats;
     struct node nodes[NODES];
     struct { bool open; int node, slot, plane, fence; uint64_t identity; } fds[4096];
     struct { int refs, status; uint64_t signal_at; uint32_t malformed; } fences[16];
@@ -444,6 +464,7 @@ static struct media_entity_desc cfe_entity(const struct fake *f,uint32_t id)
     CHECK(id>=1 && id<=7);
     struct media_entity_desc d={.id=id,.type=functions[id-1],.pads=pads[id-1],.links=links[id-1]};
     strcpy(d.name,names[id-1]); d.dev.major=81; d.dev.minor=minors[id-1];
+    if (f->unicam && id==2) strcpy(d.name,"unicam-image");
     if (f->embedded && id==1) { d.pads=2; ++d.links; strcpy(d.name,"imx708 10-001a"); }
     if (f->embedded && id==3) d.links+=2;
     return d;
@@ -463,7 +484,7 @@ static int cfe_media_ioctl(struct fake *f, unsigned long req, void *arg)
         t->topology_version=1; t->num_links=1; return 0;
     }
     if (req==MEDIA_IOC_DEVICE_INFO) {
-        strcpy(((struct media_device_info *)arg)->driver,"rp1-cfe"); return 0;
+        strcpy(((struct media_device_info *)arg)->driver,f->unicam ? "unicam":"rp1-cfe"); return 0;
     }
     if (req==MEDIA_IOC_ENUM_ENTITIES) {
         struct media_entity_desc *d=arg;
@@ -577,6 +598,23 @@ static int cfe_subdev_ioctl(struct fake *f, int fd, unsigned long req, void *arg
     CHECK(node>=0 && node<4 && f->subdev_open[node]);
     if (node==3) return lens_ioctl(f,req,arg);
     if (req==CC_SD_QUERYCAP) return -ENOTTY; /* Fixed pads on the legacy driver. */
+    if (req==CC_SD_G_SELECTION) {
+        if (!f->physical_array_larger) return -ENOTTY;
+        struct cc_subdev_selection *q=arg; CHECK(!node && !q->pad && !q->stream);
+        q->r=(struct v4l2_rect){0,0,128,96};
+        if (q->target==V4L2_SEL_TGT_NATIVE_SIZE || q->target==V4L2_SEL_TGT_CROP_BOUNDS) { q->r.width=256; q->r.height=192; }
+        return 0;
+    }
+    if (req==VIDIOC_SUBDEV_ENUM_MBUS_CODE) {
+        struct cc_subdev_mbus_code_enum *q=arg; CHECK(!node && !q->pad && !q->stream);
+        if (q->index) return -EINVAL;
+        q->code=MEDIA_BUS_FMT_SRGGB10_1X10; return 0;
+    }
+    if (req==VIDIOC_SUBDEV_ENUM_FRAME_SIZE) {
+        struct cc_subdev_frame_size_enum *q=arg; CHECK(!node && !q->pad && !q->stream && q->code==MEDIA_BUS_FMT_SRGGB10_1X10);
+        if (q->index) return -EINVAL;
+        q->min_width=q->max_width=128; q->min_height=q->max_height=96; return 0;
+    }
     if (req==VIDIOC_QUERY_EXT_CTRL || req==VIDIOC_G_EXT_CTRLS || req==VIDIOC_S_EXT_CTRLS) {
         CHECK(!node); return cfe_sensor_controls(f,req,arg);
     }
@@ -838,11 +876,11 @@ static void format_ioctl(struct fake *f, int node, struct v4l2_format *v, bool s
     if (set) {
         uint32_t w = p->width < 64 ? 64 : p->width, h = p->height < 64 ? 64 : p->height;
         uint32_t stride = p->bytesperline;
-        if (!stride) stride = p->pixelformat == V4L2_PIX_FMT_RGB24 ? w * 3 : w;
+        if (!stride) stride = f->unicam && node==7 ? w*5/4:p->pixelformat == V4L2_PIX_FMT_RGB24 ? w * 3 : w;
         uint32_t size = p->sizeimage ? p->sizeimage : stride * h;
         if (!p->sizeimage && p->pixelformat == V4L2_PIX_FMT_YUV420) size = size * 3 / 2;
         *format = (cc_format) { .fourcc = p->pixelformat, .width = w, .height = h,
-            .field = V4L2_FIELD_NONE, .colorspace = node == 0 || node == 4 ? V4L2_COLORSPACE_RAW : V4L2_COLORSPACE_SRGB,
+            .field = V4L2_FIELD_NONE, .colorspace = node == 0 || node == 4 || (f->unicam && node==7) ? V4L2_COLORSPACE_RAW : V4L2_COLORSPACE_SRGB,
             .num_planes = 1, .planes = { {stride, size} } };
     }
     p->width = format->width + (node == 0 && f->mismatch_input ? 2U : 0U);
@@ -915,6 +953,12 @@ static int legacy_media_adapter(void *ctx,int fd,unsigned long req,void *arg)
 static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
 {
     struct fake *f = ctx;
+    if (f->validation_only) {
+        CHECK(req!=VIDIOC_S_FMT && req!=VIDIOC_S_SELECTION && req!=MEDIA_IOC_SETUP_LINK &&
+              req!=VIDIOC_REQBUFS && req!=VIDIOC_STREAMON && req!=VIDIOC_STREAMOFF &&
+              req!=VIDIOC_S_EXT_CTRLS && req!=VIDIOC_S_CTRL);
+        if (req==VIDIOC_SUBDEV_S_FMT) CHECK(((struct v4l2_subdev_format *)arg)->which==V4L2_SUBDEV_FORMAT_TRY);
+    }
     if (f->shading_test && fd==18) {
         CHECK(req==DMA_HEAP_IOCTL_ALLOC && f->heap_open && !f->shading_open);
         struct dma_heap_allocation_data *a=arg;CHECK(a->len==64U*49U*8U);
@@ -987,6 +1031,11 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
     }
     if (req == VIDIOC_QUERY_EXT_CTRL || req == VIDIOC_G_EXT_CTRLS || req == VIDIOC_S_EXT_CTRLS)
         return controls_ioctl(f, node, req, arg);
+    if (req==VIDIOC_TRY_FMT) {
+        cc_format saved=n->format; int sets=f->format_sets[node];
+        format_ioctl(f,node,arg,true);
+        n->format=saved; f->format_sets[node]=sets; ++f->try_formats; return 0;
+    }
     if (req == VIDIOC_S_FMT || req == VIDIOC_G_FMT) { format_ioctl(f, node, arg, req == VIDIOC_S_FMT); return 0; }
     if (req == VIDIOC_G_SELECTION || req == VIDIOC_S_SELECTION) {
         struct v4l2_selection *s = arg;
@@ -1138,9 +1187,10 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
     if (node == f->delayed_port) return -EAGAIN;
     for (uint32_t i = 0; i < n->count; ++i) {
         struct buffer *b = &n->buffers[i];
-        if (!b->queued || ((node != 4 || f->cfe) && !b->done)) continue;
+        bool producer=(node==4 && !f->cfe) || (f->unicam && node==7);
+        if (!b->queued || (!producer && !b->done)) continue;
         b->queued = false;
-        if (node == 4 && !f->cfe) {
+        if (producer) {
             memset(memory_plane(f, node, (int)i, 0)->data, 0x77, b->size); b->used = b->size; b->timestamp = UINT64_C(123456789000);
             b->lens_setting=f->lens_position;
         }
@@ -1249,6 +1299,11 @@ static void test_processing(void)
     cc_dmabuf_plane plane;
     cc_camera *camera = producer(&f, &raw, &plane);
     OK(cc_vc4_isp_submit(isp, 1, &plane, 1, &raw, 1234));
+    struct node live_nodes[NODES]; memcpy(live_nodes,f.nodes,sizeof(live_nodes));
+    cc_vc4_configuration alternative={.input=raw_format(),
+        .output={{.fourcc=V4L2_PIX_FMT_YUV420,.width=96,.height=80}}};
+    f.validation_only=true; OK(cc_vc4_isp_try_configuration(isp,&alternative)); f.validation_only=false;
+    CHECK(!memcmp(live_nodes,f.nodes,sizeof(live_nodes)));
     OK(close_fd(&f, plane.fd));
     ERROR(cc_vc4_isp_submit(isp, 0, &plane, 1, &raw, 0), EBUSY);
     f.delayed_port = CC_VC4_STATS;
@@ -1591,6 +1646,11 @@ static void test_be_processing(void)
     tuning.global.bayer_enables = PISP_BE_BAYER_ENABLE_WBG;
     tuning.wbg.gain_r = 8192; tuning.wbg.gain_g = 4096; tuning.wbg.gain_b = 6144;
     OK(cc_pisp_be_submit(be, 1, &plane, 1, &raw, &tuning, 1234));
+    struct node live_nodes[NODES]; memcpy(live_nodes,f.nodes,sizeof(live_nodes));
+    cc_pisp_be_configuration alternative={.input=f.nodes[0].format,
+        .output={.fourcc=V4L2_PIX_FMT_YUV420M},.output1={.fourcc=V4L2_PIX_FMT_NV12M}};
+    f.validation_only=true; OK(cc_pisp_be_try_configuration(be,&alternative)); f.validation_only=false;
+    CHECK(!memcmp(live_nodes,f.nodes,sizeof(live_nodes)));
     tuning.wbg.gain_r = 0;
     CHECK(f.last_parameters.config.wbg.gain_r == 8192);
     OK(close_fd(&f, plane.fd));
@@ -2352,7 +2412,7 @@ static void test_imported_feedback(bool embedded)
     OK(cc_capture_configure_sensor_defaults(capture));
     cc_ipa_reference_tuning tuning = {.flags=CC_IPA_REFERENCE_AE|CC_IPA_REFERENCE_AWB,
         .target_luminance=0.18,.exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4};
-    cc_ipa *ipa; OK(cc_ipa_reference_create(&tuning, &ipa)); OK(cc_capture_set_ipa(capture, &ipa));
+    cc_ipa *ipa; OK(create_reference(&tuning, &ipa)); OK(cc_capture_set_ipa(capture, &ipa));
     cc_request *request, *done; OK(cc_request_create(88, &request)); bind_images(&f, request, 7, 0);
     for (unsigned int i = 0; i < 18; ++i) {
         OK(cc_capture_queue(capture, request)); OK(cc_capture_dequeue(capture, &done, 0));
@@ -2681,7 +2741,7 @@ static cc_capture *cfe_feedback_graph_mode(struct fake *f, uint32_t compression)
         .target_luminance=0.18,.exposure_speed=0.5,.white_balance_speed=0.5,
         .min_colour_gain=0.5,.max_colour_gain=4};
     cc_ipa *ipa;
-    OK(cc_ipa_reference_create(&tuning,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
+    OK(create_reference(&tuning,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
     return c;
 }
 
@@ -2927,6 +2987,55 @@ static void test_sensor_pipeline_requests(bool pisp)
     finished(&f);
 }
 
+static void create_loaded_ipa(const char *path, bool managed, uint32_t mode, cc_ipa **ipa)
+{
+    if (managed) {
+        const char *slash = strrchr(path, '/'); CHECK(slash && slash > path);
+        size_t length = (size_t)(slash - path);
+        char *directory = malloc(length + 1); CHECK(directory);
+        memcpy(directory, path, length); directory[length] = 0;
+        cc_ipa_module_directory d = {directory, 0};
+        cc_ipa_manager_options options = {.directories = &d, .num_directories = 1};
+        cc_ipa_manager *manager = NULL; OK(cc_ipa_manager_open(&options, &manager)); free(directory);
+        if (proxy_worker) {
+            cc_ipa_proxy_options proxy_options = {.worker_path = proxy_worker};
+            OK(cc_ipa_manager_create_proxy(manager, "TestPipeline", 4, 4, "alternate", &mode, sizeof(mode), &proxy_options, ipa));
+        } else OK(cc_ipa_manager_create(manager, "TestPipeline", 4, 4, "alternate", &mode, sizeof(mode), ipa));
+        cc_ipa_manager_close(manager);
+    } else {
+        cc_ipa_module *module = NULL; OK(cc_ipa_module_open(path, &module));
+        if (proxy_worker) {
+            cc_ipa_proxy_options proxy_options = {.worker_path = proxy_worker};
+            OK(cc_ipa_module_create_proxy(module, &mode, sizeof(mode), &proxy_options, ipa));
+        } else OK(cc_ipa_module_create(module, &mode, sizeof(mode), ipa));
+        cc_ipa_module_close(module);
+    }
+}
+static void test_loaded_ipa(const char *path, bool cfe, bool managed)
+{
+    struct fake f; init(&f); f.cfe = f.pisp = cfe; f.ipa_scene = true;
+    cc_capture *capture = pipeline_requests(&f);
+    cc_ipa *ipa = NULL;
+    create_loaded_ipa(path, managed, 6, &ipa);
+    ERROR(cc_capture_set_ipa(capture, &ipa), EPROTO); CHECK(ipa); cc_ipa_destroy(ipa);
+    create_loaded_ipa(path, managed, 7, &ipa);
+    OK(cc_capture_set_ipa(capture, &ipa)); CHECK(!ipa);
+    cc_request *request, *out; OK(cc_request_create(77, &request));
+    for (unsigned run = 0; run < 3; ++run) {
+        OK(cc_capture_queue(capture, request)); OK(cc_capture_dequeue(capture, &out, 0));
+        const cc_capture_result *result = cc_request_get_result(out);
+        if (out != request || result->status != CC_REQUEST_COMPLETE)
+            fprintf(stderr, "loaded IPA cfe=%u run=%u status=%u error=%d\n", cfe, run, result->status, result->error);
+        CHECK(out == request && result->status == CC_REQUEST_COMPLETE);
+        CHECK(result->ipa.flags == CC_IPA_METADATA_AE && result->ipa.exposure_ns == 128);
+        OK(cc_capture_release(capture, out)); OK(cc_capture_stop(capture));
+    }
+    /* Close while another request is owned; callbacks must still be mapped. */
+    OK(cc_capture_queue(capture, request)); cc_capture_close(capture);
+    CHECK(cc_request_get_status(request) == CC_REQUEST_CANCELLED);
+    OK(cc_request_destroy(request)); finished(&f);
+}
+
 static void test_ipa_vc4_feedback(void)
 {
     struct fake f; init(&f); f.ipa_scene=true; f.blue_gain=f.digital_gain=1000;
@@ -2934,7 +3043,7 @@ static void test_ipa_vc4_feedback(void)
     cc_ipa_reference_tuning tuning={.flags=CC_IPA_REFERENCE_AWB,.target_luminance=0.18,
         .exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4};
     cc_ipa *ipa;
-    OK(cc_ipa_reference_create(&tuning,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
+    OK(create_reference(&tuning,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
     cc_request *request,*out; OK(cc_request_create(77,&request));
     for (unsigned i=0;i<12;++i) {
         OK(cc_capture_queue(c,request)); OK(cc_capture_dequeue(c,&out,0));
@@ -2968,7 +3077,7 @@ static void test_af_graph(bool cfe)
     af.speeds[0].pdaf_gain=0; af.speeds[1].pdaf_gain=0;
     cc_ipa_reference_tuning tuning={.flags=CC_IPA_REFERENCE_AF|CC_IPA_REFERENCE_AWB|(cfe ? CC_IPA_REFERENCE_AE:0U),
         .target_luminance=0.18,.exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4,.af=&af};
-    cc_ipa *ipa; OK(cc_ipa_reference_create(&tuning,&ipa));
+    cc_ipa *ipa; OK(create_reference(&tuning,&ipa));
     af.map[1].code=999; /* Module owns a tuning copy. */
     OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
     cc_request *requests[3],*out;
@@ -3028,7 +3137,7 @@ static void test_embedded_af_graph(void)
     cc_af_tuning af; cc_af_reference_tuning(&af);
     cc_ipa_reference_tuning tuning={.flags=CC_IPA_REFERENCE_AF,.af=&af,.target_luminance=0.18,
         .exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4};
-    cc_ipa *ipa; OK(cc_ipa_reference_create(&tuning,&ipa)); OK(cc_capture_set_ipa(capture,&ipa));
+    cc_ipa *ipa; OK(create_reference(&tuning,&ipa)); OK(cc_capture_set_ipa(capture,&ipa));
     cc_request *requests[3],*out;
     for (size_t i=0;i<3;++i) OK(cc_request_create(100+i,&requests[i]));
     cc_af_controls controls={.flags=CC_AF_SET_MODE|CC_AF_TRIGGER,.mode=CC_AF_AUTO};
@@ -3120,7 +3229,7 @@ static void test_timing_graph(void)
     cc_ipa_reference_tuning t={.flags=CC_IPA_REFERENCE_AE,.target_luminance=0.18,
         .exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4,
         .min_frame_duration_ns=153600,.max_frame_duration_ns=473600};
-    cc_ipa *ipa; OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
+    cc_ipa *ipa; OK(create_reference(&t,&ipa)); OK(cc_capture_set_ipa(c,&ipa)); CHECK(!ipa);
     cc_request *request,*out; OK(cc_request_create(1,&request));
     cc_control manual={.id=V4L2_CID_EXPOSURE,.value=180};
     OK(cc_request_set_sensor_controls(request,&manual,1));
@@ -3192,8 +3301,218 @@ static void test_profile_request_snapshot(void)
     OK(cc_capture_release(capture,out));cc_capture_close(capture);OK(cc_request_destroy(r));finished(&f);
 }
 
+static void test_isp_try_configuration(void)
+{
+    ERROR(cc_vc4_isp_try_configuration(NULL,NULL),EINVAL);
+    struct fake f; init(&f); cc_vc4_isp *isp=open_isp(&f);
+    cc_vc4_configuration wanted={.input=raw_format(),
+        .output={{.fourcc=V4L2_PIX_FMT_RGB24,.width=96,.height=64}}};
+    cc_rectangle original_crop=f.crop;
+    f.validation_only=true; cc_vc4_configuration tried=wanted;
+    OK(cc_vc4_isp_try_configuration(isp,&tried));
+    CHECK(tried.output[0].width==96 && tried.output[1].fourcc==V4L2_PIX_FMT_YUV420 && f.try_formats==4);
+    CHECK(!memcmp(&original_crop,&f.crop,sizeof(f.crop)));
+    for (size_t i=0; i<4; ++i) CHECK(!f.nodes[i].format.fourcc);
+    f.validation_only=false;
+    uint32_t slots=3; ERROR(cc_vc4_isp_allocate_buffers(isp,&slots),EPIPE);
+    configure(isp); OK(cc_vc4_isp_allocate_buffers(isp,&slots));
+    cc_vc4_configuration baseline; uint32_t count; OK(cc_vc4_capture_info(isp,&baseline,&count));
+    struct node nodes[NODES]; memcpy(nodes,f.nodes,sizeof(nodes)); original_crop=f.crop;
+    f.validation_only=true; tried=wanted; OK(cc_vc4_isp_try_configuration(isp,&tried));
+    CHECK(!memcmp(nodes,f.nodes,sizeof(nodes)) && !memcmp(&original_crop,&f.crop,sizeof(f.crop)));
+    for (int port=0; port<4; ++port) {
+        tried=wanted; cc_vc4_configuration saved=tried;
+        f.fail_req=VIDIOC_TRY_FMT; f.fail_node=port; f.fail_nth=1; f.fail_errno=EIO;
+        ERROR(cc_vc4_isp_try_configuration(isp,&tried),EIO); CHECK(!memcmp(&tried,&saved,sizeof(tried)));
+    }
+    f.fail_req=0; f.mismatch_input=true; tried=wanted; cc_vc4_configuration saved=tried;
+    ERROR(cc_vc4_isp_try_configuration(isp,&tried),EPIPE); CHECK(!memcmp(&tried,&saved,sizeof(tried)));
+    f.mismatch_input=false; cc_vc4_configuration actual; OK(cc_vc4_capture_info(isp,&actual,&count));
+    CHECK(!memcmp(&baseline,&actual,sizeof(actual)) && !memcmp(nodes,f.nodes,sizeof(nodes)));
+    f.validation_only=false; cc_vc4_isp_close(isp); finished(&f);
+}
+static void test_be_try_configuration(void)
+{
+    ERROR(cc_pisp_be_try_configuration(NULL,NULL),EINVAL);
+    for (unsigned revision=0; revision<2; ++revision) {
+        struct fake f; init(&f); f.pisp=f.widen_chroma=f.force_color_defaults=true;
+        f.hardware_version=revision ? CC_PISP_BE_VERSION_BCM2712_D0:CC_PISP_BE_VERSION_BCM2712_C0;
+        cc_pisp_be *be=open_be(&f,false);
+        cc_pisp_be_configuration wanted=be_configuration(V4L2_PIX_FMT_YUV420M,V4L2_PIX_FMT_NV12M);
+        wanted.crop[0]=(cc_rectangle){16,8,96,80}; wanted.output.width=64; wanted.output.height=48;
+        for (size_t i=0; i<4; ++i) {
+            wanted.auxiliary[i].format.fourcc=CC_FOURCC('P','C','3','R');
+            wanted.auxiliary[i].compression_offset=2048;
+        }
+        int handles=f.handles; f.validation_only=true;
+        cc_pisp_be_configuration tried=wanted; OK(cc_pisp_be_try_configuration(be,&tried));
+        CHECK(tried.hardware_version==f.hardware_version && tried.output.width==64 && tried.output.height==48);
+        CHECK(tried.output.planes[1].stride==64 && tried.output.planes[1].size==1536);
+        CHECK(tried.output.quantization==V4L2_QUANTIZATION_LIM_RANGE && tried.output1.colorspace==V4L2_COLORSPACE_JPEG);
+        CHECK(f.handles==handles && f.try_formats>=8);
+        for (size_t i=0; i<NODES; ++i) CHECK(!f.nodes[i].format.fourcc);
+        for (int port=3; port<8; ++port) ERROR(cc_pisp_be_fd(be,(enum cc_pisp_be_port)port),ENODEV);
+        for (uint32_t compression=1; compression<=3; ++compression) {
+            cc_pisp_be_configuration compressed=wanted;
+            compressed.input.fourcc=CC_FOURCC('P','C','0'+compression,'R');
+            compressed.input.planes[0]=(cc_plane_format){128,128*96}; compressed.compression_offset=2048;
+            OK(cc_pisp_be_try_configuration(be,&compressed));
+            CHECK(compressed.input.fourcc==CC_FOURCC('P','C','0'+compression,'R') && f.handles==handles);
+            for (size_t i=0; i<NODES; ++i) CHECK(!f.nodes[i].format.fourcc);
+        }
+        f.validation_only=false; uint32_t slots=3; ERROR(cc_pisp_be_allocate_buffers(be,&slots),EPIPE);
+        cc_pisp_be_configuration baseline=be_configuration(V4L2_PIX_FMT_RGB24,0);
+        OK(cc_pisp_be_configure(be,&baseline)); OK(cc_pisp_be_allocate_buffers(be,&slots));
+        struct node nodes[NODES]; memcpy(nodes,f.nodes,sizeof(nodes));
+        handles=f.handles; int mappings=f.mappings;
+        f.validation_only=true; tried=wanted; OK(cc_pisp_be_try_configuration(be,&tried));
+        CHECK(f.handles==handles && f.mappings==mappings && !memcmp(nodes,f.nodes,sizeof(nodes)));
+        const int ports[]={0,1,2,3,12,13,14,15};
+        for (size_t stage=0; stage<sizeof(ports)/sizeof(ports[0]); ++stage) {
+            tried=wanted; cc_pisp_be_configuration saved=tried;
+            f.fail_req=VIDIOC_TRY_FMT; f.fail_node=ports[stage]; f.fail_nth=1; f.fail_errno=EIO;
+            ERROR(cc_pisp_be_try_configuration(be,&tried),EIO);
+            CHECK(!memcmp(&tried,&saved,sizeof(tried)) && f.handles==handles && !memcmp(nodes,f.nodes,sizeof(nodes)));
+        }
+        f.fail_req=0; f.bad_parameters=true; tried=wanted; cc_pisp_be_configuration saved=tried;
+        ERROR(cc_pisp_be_try_configuration(be,&tried),EPROTO); CHECK(!memcmp(&tried,&saved,sizeof(tried)));
+        f.bad_parameters=false; f.mismatch_input=true; tried=wanted; saved=tried;
+        ERROR(cc_pisp_be_try_configuration(be,&tried),EPIPE); CHECK(!memcmp(&tried,&saved,sizeof(tried)));
+        f.mismatch_input=false;
+        f.fail_req=VIDIOC_QUERYCAP; f.fail_node=15; f.fail_nth=1; f.fail_errno=EIO;
+        tried=wanted; saved=tried; ERROR(cc_pisp_be_try_configuration(be,&tried),EIO);
+        CHECK(!memcmp(&tried,&saved,sizeof(tried)) && f.handles==handles && !memcmp(nodes,f.nodes,sizeof(nodes)));
+        f.fail_req=0;
+        cc_pisp_be_configuration actual; uint32_t count; OK(cc_be_capture_info(be,&actual,&count));
+        CHECK(!memcmp(&actual,&baseline,sizeof(actual)) && count==slots && f.handles==handles);
+        f.validation_only=false; cc_pisp_be_close(be); finished(&f);
+    }
+}
+
+static void test_processed_roles(bool pisp)
+{
+    const enum cc_stream_role roles[][3]={{CC_ROLE_VIEWFINDER,CC_ROLE_RAW,CC_ROLE_VIDEO_RECORDING},
+        {CC_ROLE_STILL_CAPTURE},{CC_ROLE_RAW},{CC_ROLE_VIEWFINDER},{CC_ROLE_VIDEO_RECORDING},
+        {CC_ROLE_VIDEO_RECORDING},{CC_ROLE_VIEWFINDER,CC_ROLE_VIDEO_RECORDING}};
+    const size_t counts[]={3,1,1,1,1,1,2};
+    for (size_t sample=0;sample<7;++sample) {
+        if (!pisp && sample>4) continue;
+        struct fake f; init(&f); f.pisp=pisp; f.cfe=true; f.unicam=!pisp;
+        f.mbus[0][0][0]=f.mbus[0][1][0]=(struct v4l2_mbus_framefmt){.code=MEDIA_BUS_FMT_SRGGB10_1X10,
+            .width=128,.height=96,.field=V4L2_FIELD_NONE,.colorspace=V4L2_COLORSPACE_RAW};
+        if (pisp && sample==3) f.hardware_version=CC_PISP_BE_VERSION_BCM2712_D0;
+        struct cc_io io={&ops,&f}; cc_capture_devices d={0};
+        if (pisp) {
+            f.mbus[0][0][0]=f.mbus[0][1][0]=(struct v4l2_mbus_framefmt){.code=MEDIA_BUS_FMT_SRGGB10_1X10,
+                .width=128,.height=96,.field=V4L2_FIELD_NONE,.colorspace=V4L2_COLORSPACE_RAW};
+            cc_camera_info info={.pipeline=CC_PIPELINE_RPI_CFE,.media_path="/dev/media1",.video_path="/dev/video7",.sensor_entity=1};
+            OK(cc_cfe_open_io(&info,&io,&d.frontend)); d.backend=open_be(&f,false);
+            if (sample==1) {
+                f.physical_array_larger=true; cc_camera_properties properties;
+                OK(cc_cfe_get_properties(d.frontend,&properties)); CHECK(properties.pixel_array_width==256 && properties.pixel_array_height==192);
+            }
+        } else {
+            cc_camera_info info={.pipeline=CC_PIPELINE_RPI_UNICAM,.media_path="/dev/media1",.video_path="/dev/video7",.sensor_entity=1};
+            OK(cc_camera_open_io(&info,&io,&d.camera));
+            d.vc4=open_isp(&f);
+        }
+        f.validation_only=true; cc_pipeline_configuration c;
+        int ret=cc_pipeline_generate_configuration(&d,roles[sample],counts[sample],&c);
+        if (ret<0) fprintf(stderr,"processed generation pisp=%d sample=%zu error=%d\n",pisp,sample,ret);
+        CHECK(ret>=0 && c.num_streams==counts[sample]);
+        for (size_t i=0;i<c.num_streams;++i) CHECK(c.streams[i].role==roles[sample][i]);
+        if (!sample) CHECK(c.streams[0].stream==CC_CAPTURE_OUTPUT1 && c.streams[1].stream==CC_CAPTURE_RAW &&
+            c.streams[2].stream==CC_CAPTURE_OUTPUT0 && c.streams[0].format.width==800 && c.streams[2].format.width==1920);
+        if (sample==1 || sample==3) CHECK(c.streams[0].stream==(pisp ? CC_CAPTURE_OUTPUT1:CC_CAPTURE_OUTPUT0));
+        if (sample==1) CHECK(c.streams[0].format.width==128 && c.streams[0].format.height==96);
+        if (pisp && !sample) CHECK(c.streams[0].format.fourcc==V4L2_PIX_FMT_BGR24 &&
+            c.streams[2].format.colorspace==V4L2_COLORSPACE_JPEG && c.streams[2].format.quantization==V4L2_QUANTIZATION_FULL_RANGE);
+        if (pisp && sample==3) CHECK(c.streams[0].format.fourcc==V4L2_PIX_FMT_XBGR32);
+        if (pisp && sample==4) CHECK(c.streams[0].format.colorspace==V4L2_COLORSPACE_REC709 &&
+            c.streams[0].format.ycbcr_enc==V4L2_YCBCR_ENC_709 && c.streams[0].format.quantization==V4L2_QUANTIZATION_LIM_RANGE);
+        if (sample==5) {
+            c.streams[0].format=(cc_format){.fourcc=V4L2_PIX_FMT_GREY,.width=64,.height=48,
+                .colorspace=V4L2_COLORSPACE_REC709,.xfer_func=V4L2_XFER_FUNC_709,.ycbcr_enc=V4L2_YCBCR_ENC_709,
+                .quantization=V4L2_QUANTIZATION_LIM_RANGE};
+            CHECK(cc_pipeline_validate_configuration(&d,&c)>=0);
+            CHECK(c.streams[0].stream==CC_CAPTURE_OUTPUT1 && c.streams[0].format.fourcc==V4L2_PIX_FMT_GREY &&
+                c.streams[0].format.quantization==V4L2_QUANTIZATION_LIM_RANGE);
+        }
+        if (sample==6) {
+            c.streams[0].format.colorspace=V4L2_COLORSPACE_SRGB;
+            c.streams[0].format.xfer_func=V4L2_XFER_FUNC_SRGB;
+            c.streams[1].format.colorspace=V4L2_COLORSPACE_REC709;
+            c.streams[1].format.xfer_func=V4L2_XFER_FUNC_709;
+            c.streams[1].format.quantization=V4L2_QUANTIZATION_LIM_RANGE;
+            CHECK(cc_pipeline_validate_configuration(&d,&c)>=0);
+            CHECK(c.streams[1].format.colorspace==V4L2_COLORSPACE_JPEG && c.streams[1].format.quantization==V4L2_QUANTIZATION_FULL_RANGE);
+        }
+        CHECK(cc_pipeline_validate_configuration(&d,&c)==CC_CONFIGURATION_VALID);
+        f.validation_only=false; CHECK(cc_pipeline_configure(&d,&c)>=0);
+        if (pisp) {
+            cc_cfe_configuration fe; cc_pisp_be_configuration be;
+            OK(cc_cfe_get_configuration(d.frontend,&fe)); OK(cc_pisp_be_get_configuration(d.backend,&be));
+            CHECK(be.input.fourcc==c.source_format.fourcc && fe.image.width==c.source_format.width && be.parameters.planes[0].size);
+        } else { cc_vc4_configuration vc4; OK(cc_vc4_isp_get_configuration(d.vc4,&vc4)); CHECK(vc4.statistics.fourcc && vc4.input.width==128); }
+        if (!sample) {
+            cc_pipeline_configuration saved=c;
+            f.fail_req=VIDIOC_S_FMT; f.fail_node=1; f.fail_nth=1; f.fail_errno=EIO;
+            ERROR(cc_pipeline_configure(&d,&c),EIO); CHECK(!memcmp(&c,&saved,sizeof(c)));
+            uint32_t slots=2;
+            if (pisp) { ERROR(cc_cfe_allocate_buffers(d.frontend,&slots),EPIPE); ERROR(cc_pisp_be_allocate_buffers(d.backend,&slots),EPIPE); }
+            else { ERROR(cc_camera_allocate_buffers(d.camera,&slots),EPIPE); ERROR(cc_vc4_isp_allocate_buffers(d.vc4,&slots),EPIPE); }
+            f.fail_req=0; CHECK(cc_pipeline_configure(&d,&c)>=0);
+            if (pisp) OK(cc_pisp_be_allocate_buffers(d.backend,&slots)); else OK(cc_vc4_isp_allocate_buffers(d.vc4,&slots));
+            f.validation_only=true; ERROR(cc_pipeline_configure(&d,&c),EBUSY); f.validation_only=false;
+            if (pisp) OK(cc_pisp_be_free_buffers(d.backend)); else OK(cc_vc4_isp_free_buffers(d.vc4));
+        }
+        uint32_t slots=2;
+        if (pisp) { OK(cc_cfe_allocate_buffers(d.frontend,&slots)); OK(cc_pisp_be_allocate_buffers(d.backend,&slots)); }
+        else { OK(cc_camera_allocate_buffers(d.camera,&slots)); OK(cc_vc4_isp_allocate_buffers(d.vc4,&slots)); }
+        cc_capture *capture=NULL; OK(cc_capture_create(&d,&capture,&slots));
+        cc_request *request=NULL,*out=NULL; OK(cc_request_create(23,&request)); OK(cc_capture_queue(capture,request));
+        OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==request && cc_request_get_result(out)->status==CC_REQUEST_COMPLETE);
+        for (size_t i=0;i<c.num_streams;++i) {
+            const cc_capture_result *result=cc_request_get_result(out);
+            const cc_frame *frame=c.streams[i].stream==CC_CAPTURE_RAW ? &result->raw:
+                &result->output[c.streams[i].stream==CC_CAPTURE_OUTPUT1 ? 1:0];
+            CHECK(frame->num_planes==c.streams[i].format.num_planes && frame->planes[0].length==c.streams[i].format.planes[0].size);
+        }
+        OK(cc_capture_release(capture,out)); cc_capture_close(capture); OK(cc_request_destroy(request)); finished(&f);
+    }
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "proxy-feedback")) {
+        proxy_worker = argv[2]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
+        test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_cfe_be_feedback(1); test_cfe_be_feedback(2);
+        test_af_graph(false); test_af_graph(true); test_embedded_af_graph(); test_timing_graph();
+        test_imported_feedback(false); test_imported_feedback(true);
+        use_v2_topology = true;
+        test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_af_graph(false); test_af_graph(true); test_embedded_af_graph();
+        puts("Isolated VC4/CFE/PiSP feedback, AF/PDAF, timing, imported results and restarts passed"); return 0;
+    }
+    if (argc == 4 && (!strcmp(argv[1], "proxy-modules") || !strcmp(argv[1], "proxy-manager"))) {
+        proxy_worker = argv[3]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
+    }
+    if ((argc == 3 && (!strcmp(argv[1], "modules") || !strcmp(argv[1], "manager"))) ||
+        (argc == 4 && proxy_worker)) {
+        bool managed = !strcmp(argv[1], "manager") || !strcmp(argv[1], "proxy-manager");
+        test_loaded_ipa(argv[2], false, managed); test_loaded_ipa(argv[2], true, managed);
+        use_v2_topology = true; test_loaded_ipa(argv[2], false, managed); test_loaded_ipa(argv[2], true, managed);
+        puts("Loaded IPA adoption, VC4/CFE/PiSP completion, restart and cancellation passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"roles")) {
+        test_processed_roles(false); test_processed_roles(true);
+        use_v2_topology=true; test_processed_roles(false); test_processed_roles(true);
+        puts("VC4/PiSP roles, sensor/colour selection, stream assignment, apply failure recovery and adopted capture passed"); return 0;
+    }
+    if (argc==2 && !strcmp(argv[1],"try-configuration")) {
+        test_isp_try_configuration(); test_be_try_configuration();
+        use_v2_topology=true; test_isp_try_configuration(); test_be_try_configuration();
+        puts("VC4/PiSP TRY layouts, crops, revisions, history ports, active-state preservation and rollback passed"); return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"timing")) {
         test_timing_graph(); use_v2_topology=true; test_timing_graph();
         puts("Live timing limits, frame-duration IPA planning, priority blanking and future exposure ranges passed"); return 0;

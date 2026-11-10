@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
+#define _XOPEN_SOURCE 700
 #include "internal.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
@@ -114,6 +116,65 @@ static int system_identity(void *ctx, int fd, uint64_t *device, uint64_t *inode)
     return 0;
 }
 
+/* Bounded text attributes relative to a character device's physical parent.
+ * The kernel resolves the device symlink before processing ../removable. */
+static int system_device_number(void *ctx, int fd, unsigned int *major_id, unsigned int *minor_id)
+{
+    (void)ctx;
+    struct stat st;
+    if (fstat(fd, &st) < 0) { int saved=errno; return saved>0 ? -saved:-EIO; }
+    if (!S_ISCHR(st.st_mode)) return -ENOTSUP;
+    *major_id=major(st.st_rdev); *minor_id=minor(st.st_rdev);
+    return 0;
+}
+
+static int system_canonical(void *ctx, const char *path, char *out, size_t capacity)
+{
+    (void)ctx;
+    char *resolved=realpath(path,NULL);
+    if (!resolved) return -errno;
+    size_t length=strlen(resolved);
+    int ret=length<capacity ? 0:-ENAMETOOLONG;
+    if (!ret) memcpy(out,resolved,length+1);
+    free(resolved);
+    return ret;
+}
+
+static int system_read_text(void *ctx, const char *path, char *out, size_t capacity)
+{
+    (void)ctx;
+    char value[4096];
+    int source = system_open(NULL, path, O_RDONLY | O_CLOEXEC);
+    if (source < 0) return source;
+    size_t used = 0;
+    int ret = 0;
+    while (used < sizeof(value)) {
+        ssize_t got = read(source, value + used, sizeof(value) - used);
+        if (got < 0) { if (errno == EINTR) continue; ret = -errno; break; }
+        if (!got) break;
+        used += (size_t)got;
+    }
+    int closed = system_close(NULL, source);
+    if (ret < 0) return ret;
+    if (closed < 0) return closed;
+    if (used == sizeof(value) || used >= capacity) return -EOVERFLOW;
+    if (memchr(value, '\0', used)) return -EPROTO;
+    memcpy(out, value, used);
+    out[used] = '\0';
+    return 0;
+}
+
+static int system_sysfs_read(void *ctx, int fd, const char *attribute, char *out, size_t capacity)
+{
+    unsigned int major_id,minor_id;
+    int ret=system_device_number(ctx,fd,&major_id,&minor_id);
+    if (ret<0) return ret;
+    char path[256];
+    int n=snprintf(path,sizeof(path),"/sys/dev/char/%u:%u/device/%s",major_id,minor_id,attribute);
+    if (n<0 || (size_t)n>=sizeof(path)) return -ENAMETOOLONG;
+    return system_read_text(ctx,path,out,capacity);
+}
+
 static int system_now(void *ctx, uint64_t *ns)
 {
     (void)ctx;
@@ -171,6 +232,8 @@ static const struct cc_io_ops system_ops = {
     .open = system_open, .close = system_close, .ioctl = system_ioctl,
     .map = system_map, .unmap = system_unmap, .lock = system_lock,
     .wait = system_wait, .now = system_now, .resolve = system_resolve,
-    .duplicate = system_duplicate, .wait_many = system_wait_many, .identity = system_identity
+    .duplicate = system_duplicate, .wait_many = system_wait_many, .identity = system_identity,
+    .sysfs_read = system_sysfs_read, .device_number = system_device_number,
+    .canonical = system_canonical, .read_text = system_read_text
 };
 const struct cc_io cc_system_io = { .ops = &system_ops, .ctx = NULL };

@@ -51,8 +51,8 @@ static int write_frame(FILE *file, const cc_frame *frame)
 static void usage(const char *program)
 {
     fprintf(stderr, "Usage: %s -l\n"
-            "       %s [-c index | -d /dev/videoN] -m\n"
-            "       %s [-c index | -d /dev/videoN] -w width -h height -f FOURCC\n"
+            "       %s [-c index | -d /dev/videoN | -I ID] -m\n"
+            "       %s [-c index | -d /dev/videoN | -I ID] -w width -h height -f FOURCC\n"
             "          [-n frames] [-o output.raw] [-g] [-j]\n"
             "          [-p [-i /dev/mediaN] [-W output-width -H output-height -F FOURCC]\n"
             "              [-s statistics.bin]]\n"
@@ -60,7 +60,7 @@ static void usage(const char *program)
             "-p enables the Pi 4/earlier ISP (default output: 640x480 RGB3).\n"
             "-g enables that ISP with reference automatic exposure/white balance.\n"
             "-j adds the standard V3/IMX708 continuous autofocus profile (opt-in).\n"
-            "Use -c for CSI/VIMC cameras so the sensor and media route are configured.\n",
+            "Use -c or -I for CSI/VIMC cameras so the sensor and media route are configured.\n",
             program, program, program);
 }
 
@@ -113,12 +113,13 @@ static int print_modes(cc_camera *camera)
 int main(int argc, char **argv)
 {
     bool list_only = false, modes_only = false, process = false, automatic = false, autofocus = false;
+    bool index_selected=false;
     uint32_t index = 0, frames = 10;
     cc_format format = {0};
     cc_format output_format = { .fourcc = CC_FOURCC('R', 'G', 'B', '3'), .width = 640, .height = 480 };
-    const char *video_path = NULL, *output_path = NULL, *isp_path = NULL, *statistics_path = NULL;
+    const char *video_path = NULL, *output_path = NULL, *isp_path = NULL, *statistics_path = NULL, *camera_id=NULL;
     int option;
-    while ((option = getopt(argc, argv, "lmpgjc:d:w:h:f:n:o:i:W:H:F:s:")) != -1) {
+    while ((option = getopt(argc, argv, "lmpgjc:d:I:w:h:f:n:o:i:W:H:F:s:")) != -1) {
         int ret = 0;
         switch (option) {
         case 'l': list_only = true; break;
@@ -131,7 +132,8 @@ int main(int argc, char **argv)
         case 'H': process = true; ret = number(optarg, &output_format.height); break;
         case 'F': process = true; ret = pixel_format(optarg, &output_format.fourcc); break;
         case 's': process = true; statistics_path = optarg; break;
-        case 'c': ret = number(optarg, &index); break;
+        case 'c': index_selected=true; ret = number(optarg, &index); break;
+        case 'I': camera_id=optarg; break;
         case 'd': video_path = optarg; break;
         case 'w': ret = number(optarg, &format.width); break;
         case 'h': ret = number(optarg, &format.height); break;
@@ -145,7 +147,9 @@ int main(int argc, char **argv)
             return EXIT_FAILURE;
         }
     }
-    if (optind != argc || (!list_only && !modes_only &&
+    if (optind != argc || (camera_id && (video_path || index_selected || !camera_id[0] ||
+        strnlen(camera_id,CC_CAMERA_ID_MAX)==CC_CAMERA_ID_MAX)) || (video_path && index_selected) ||
+        (!list_only && !modes_only &&
         (!format.width || !format.height || !format.fourcc || !frames ||
          (process && (!output_format.width || !output_format.height)) ||
          (output_path && statistics_path && !strcmp(output_path, statistics_path))))) {
@@ -163,21 +167,23 @@ int main(int argc, char **argv)
     uint32_t isp_buffers = 4;
     FILE *output = NULL, *statistics = NULL;
     int ret = 0;
-    if (list_only || !video_path) {
+    if (list_only || (!video_path && !camera_id)) {
         ret = cc_enumerate(&list, &count);
         if (ret < 0)
             goto done;
     }
     if (list_only) {
         for (size_t i = 0; i < count; ++i)
-            printf("%zu: %s [%s] %s\n", i, list[i].name,
+            printf("%zu: %s [%s] %s\n    id=%s\n", i, list[i].name,
                     pipeline_name(list[i].pipeline),
-                    list[i].video_path);
+                    list[i].video_path,list[i].id[0] ? list[i].id:"(unavailable)");
         if (!count)
             puts("No accessible supported cameras found.");
         goto done;
     }
-    if (video_path) {
+    if (camera_id) {
+        ret=cc_camera_open_by_id(camera_id,&camera);
+    } else if (video_path) {
         ret = cc_camera_open_video(video_path, &camera);
     } else if (index < count) {
         ret = cc_camera_open(&list[index], &camera);

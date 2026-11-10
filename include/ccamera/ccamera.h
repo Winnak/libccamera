@@ -17,6 +17,7 @@ extern "C" {
 
 #define CC_MAX_PLANES 8
 #define CC_PATH_MAX 256
+#define CC_CAMERA_ID_MAX 1024
 #define CC_FOURCC(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | \
                               ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
 
@@ -30,6 +31,14 @@ enum cc_pipeline {
     CC_PIPELINE_UVC = 4
 };
 
+/* IDs describe a firmware/topology location, not a device serial number.
+ * USB IDs remain stable on the same controller/port/interface; moving a camera
+ * to another port changes its ID. NONE means no reliable identity is available. */
+enum cc_camera_id_type {
+    CC_CAMERA_ID_NONE = 0, CC_CAMERA_ID_FIRMWARE = 1, CC_CAMERA_ID_PLATFORM = 2,
+    CC_CAMERA_ID_USB = 3, CC_CAMERA_ID_VIDEO = 4
+};
+
 typedef struct cc_camera_info {
     enum cc_pipeline pipeline;
     char name[128];
@@ -37,6 +46,8 @@ typedef struct cc_camera_info {
     char video_path[CC_PATH_MAX];
     char media_path[CC_PATH_MAX];
     uint32_t sensor_entity;
+    enum cc_camera_id_type id_type;
+    char id[CC_CAMERA_ID_MAX]; /* Opaque, NUL-terminated; empty when unavailable. */
 } cc_camera_info;
 
 typedef struct cc_plane_format {
@@ -118,6 +129,54 @@ typedef struct cc_rectangle {
     uint32_t width, height;
 } cc_rectangle;
 
+/* EXIF tag 274 values. Rotate clockwise first, then optionally mirror
+ * horizontally. The 90/270 names follow libcamera's image-memory convention. */
+enum cc_orientation {
+    CC_ORIENTATION_ROTATE_0 = 1, CC_ORIENTATION_ROTATE_0_MIRROR = 2,
+    CC_ORIENTATION_ROTATE_180 = 3, CC_ORIENTATION_ROTATE_180_MIRROR = 4,
+    CC_ORIENTATION_ROTATE_90_MIRROR = 5, CC_ORIENTATION_ROTATE_270 = 6,
+    CC_ORIENTATION_ROTATE_270_MIRROR = 7, CC_ORIENTATION_ROTATE_90 = 8
+};
+/* Apply horizontal/vertical flips first, then transpose. Composition applies
+ * its first argument followed by its second, as in libcamera's operator*. */
+enum cc_transform {
+    CC_TRANSFORM_IDENTITY = 0, CC_TRANSFORM_HFLIP = 1, CC_TRANSFORM_VFLIP = 2,
+    CC_TRANSFORM_ROTATE_180 = 3, CC_TRANSFORM_TRANSPOSE = 4,
+    CC_TRANSFORM_ROTATE_270 = 5, CC_TRANSFORM_ROTATE_90 = 6,
+    CC_TRANSFORM_ROTATE_180_TRANSPOSE = 7
+};
+/* Pure orientation algebra. Rotation accepts signed multiples of 90 degrees,
+ * normalized modulo 360. Invalid inputs return -EINVAL without changing output. */
+CC_API int cc_orientation_from_rotation(int32_t angle, enum cc_orientation *orientation);
+CC_API int cc_transform_compose(enum cc_transform first, enum cc_transform second, enum cc_transform *result);
+CC_API int cc_transform_inverse(enum cc_transform transform, enum cc_transform *inverse);
+CC_API int cc_orientation_transform(enum cc_orientation desired, enum cc_orientation base, enum cc_transform *transform);
+CC_API int cc_orientation_apply(enum cc_orientation base, enum cc_transform transform, enum cc_orientation *orientation);
+
+enum cc_camera_location {
+    CC_CAMERA_LOCATION_FRONT = 0, CC_CAMERA_LOCATION_BACK = 1, CC_CAMERA_LOCATION_EXTERNAL = 2
+};
+enum cc_camera_cfa {
+    CC_CAMERA_CFA_RGGB = 0, CC_CAMERA_CFA_GRBG = 1, CC_CAMERA_CFA_GBRG = 2,
+    CC_CAMERA_CFA_BGGR = 3, CC_CAMERA_CFA_MONO = 4
+};
+enum cc_camera_property_flags {
+    CC_CAMERA_PROPERTY_MODEL = 1U, CC_CAMERA_PROPERTY_LOCATION = 2U,
+    CC_CAMERA_PROPERTY_ROTATION = 4U, CC_CAMERA_PROPERTY_PIXEL_ARRAY = 8U,
+    CC_CAMERA_PROPERTY_ACTIVE_AREA = 16U, CC_CAMERA_PROPERTY_UNIT_CELL = 32U,
+    CC_CAMERA_PROPERTY_CFA = 64U
+};
+typedef struct cc_camera_properties {
+    uint32_t flags; /* Only flagged fields are available; all others are zero. */
+    char model[128]; /* ASCII model, without the I2C address for recognized entity naming. */
+    enum cc_camera_location location;
+    int32_t rotation; /* Native mounting rotation in degrees, per V4L2; before image transforms. */
+    uint32_t pixel_array_width, pixel_array_height;
+    cc_rectangle active_area; /* Sensor coordinates; one active area is currently supported. */
+    uint32_t unit_cell_width_nm, unit_cell_height_nm;
+    enum cc_camera_cfa cfa; /* Native advertised pattern, before runtime flips. */
+} cc_camera_properties;
+
 typedef struct cc_control_info {
     uint32_t id, type, flags;
     char name[32];
@@ -145,12 +204,39 @@ typedef struct cc_control_menu {
 CC_API const char *cc_version(void);
 CC_API int cc_enumerate(cc_camera_info **cameras, size_t *count);
 CC_API void cc_camera_list_free(cc_camera_info *cameras);
+/* Fresh discovery followed by an exact ID match. Device/media node numbers
+ * can change. -ENOENT if absent, -ENOTUNIQ for an ambiguous ID. Output is NULL
+ * on error. No identity is synthesized from /dev names or enumeration order. */
+CC_API int cc_camera_open_by_id(const char *id, cc_camera **camera);
+/* A nonempty info->id is revalidated against opened hardware before returning
+ * the handle. A mismatch returns -ESTALE; unavailable verification fails rather
+ * than opening another camera. Empty IDs retain path-based opening. */
 CC_API int cc_camera_open(const cc_camera_info *info, cc_camera **camera);
 /* Open a self-contained capture node. MC-centric nodes require cc_camera_open
  * with a discovered pipeline and are rejected by this convenience function. */
 CC_API int cc_camera_open_video(const char *path, cc_camera **camera);
 CC_API void cc_camera_close(cc_camera *camera);
 CC_API const cc_camera_info *cc_camera_get_info(const cc_camera *camera);
+/* Read-only normalized properties, available before configuration and during
+ * capture. Sensors use control defaults, static cell sizes and CROP_BOUNDS /
+ * CROP_DEFAULT, falling back to the largest advertised mode for geometry.
+ * VIMC uses its largest sensor mode. UVC uses its media model (or video card),
+ * largest video mode and USB removable attribute (fixed => Front, else External).
+ * Sensor rotation defaults to zero; missing sensor location stays unavailable.
+ * Unsupported optional queries leave fields unflagged. Unexpected driver
+ * failures, malformed replies and excessive enumeration fail the entire query,
+ * leaving *properties unchanged. No flips or graph changes are applied.
+ * Serialize with other operations on this camera. */
+CC_API int cc_camera_get_properties(cc_camera *camera, cc_camera_properties *properties);
+/* Read-only upstream sensor policy: both writable HFLIP and VFLIP controls
+ * are required. Unsupported flips or a required transpose adjust *orientation
+ * to mounting orientation and select identity. Missing/invalid mounting rotation
+ * defaults to Rotate0. Self-contained video uses Rotate0/identity. Outputs are
+ * unchanged on error. No controls, routes, formats or buffers are written. */
+CC_API int cc_camera_try_orientation(cc_camera *camera, enum cc_orientation *orientation, enum cc_transform *transform);
+/* Live mounting orientation composed with readable sensor flip values.
+ * Video without a sensor reports Rotate0. No format configuration is required. */
+CC_API int cc_camera_get_orientation(cc_camera *camera, enum cc_orientation *orientation);
 /* Borrowed nonblocking fd for poll/epoll; never close it or issue ioctls on it. */
 CC_API int cc_camera_fd(const cc_camera *camera);
 
@@ -202,7 +288,21 @@ CC_API int cc_camera_get_format(cc_camera *camera, cc_format *format);
  * set their sensor, processing pads and links before the capture node. VIMC
  * adjusts unsupported formats/sizes to its version-dependent RGB limits. */
 CC_API int cc_camera_try_format(cc_camera *camera, cc_format *format);
+/* TRY negotiation plus orientation/flip prediction, without writing controls
+ * or active formats. Bayer phase is predicted from live layout-changing flip
+ * controls; configure_oriented still verifies the actual applied result.
+ * Caller outputs stay unchanged on error. */
+CC_API int cc_camera_try_format_oriented(cc_camera *camera, cc_format *format, enum cc_orientation *orientation);
 CC_API int cc_camera_configure(cc_camera *camera, cc_format *format);
+/* Negotiate orientation, apply sensor flips, then configure the complete raw
+ * path. Bayer order can change; sample depth and packing are preserved. Native
+ * format adjustment and actual orientation are returned only on full success.
+ * Call before allocating image/embedded buffers. Unsupported orientation is
+ * adjusted using try_orientation's policy; writable individual flips are reset
+ * on fallback. Fixed read-only flips are reflected in the actual result.
+ * A failed call can change hardware; reconfigure before capture. Outputs stay
+ * unchanged on error. Legacy configure leaves native flip settings alone. */
+CC_API int cc_camera_configure_oriented(cc_camera *camera, cc_format *format, enum cc_orientation *orientation);
 
 /* MMAP allocation. count is in/out; a driver may change the requested count.
  * Buffers belong to the camera until free_buffers or close. */

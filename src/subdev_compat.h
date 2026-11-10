@@ -6,6 +6,7 @@
 #define CCAMERA_SUBDEV_COMPAT_H
 #include <linux/ioctl.h>
 #include <linux/types.h>
+#include <linux/videodev2.h>
 #include <linux/v4l2-mediabus.h>
 
 /* Stream IDs occupy the former first reserved word, preserving ioctl sizes on
@@ -22,6 +23,13 @@ struct cc_subdev_mbus_code_enum {
 struct cc_subdev_frame_size_enum {
     __u32 index, pad, code, min_width, max_width, min_height, max_height, which, stream, reserved[7];
 };
+struct cc_subdev_selection {
+    __u32 which, pad, target, flags;
+    struct v4l2_rect r;
+    __u32 stream, reserved[7];
+};
+#define CC_SD_G_SELECTION _IOWR('V', 61, struct cc_subdev_selection)
+_Static_assert(sizeof(struct cc_subdev_selection)==64,"Linux subdevice selection ABI");
 struct cc_subdev_frame_interval {
     __u32 pad;
     struct v4l2_fract interval;

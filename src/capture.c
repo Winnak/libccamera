@@ -7,9 +7,11 @@
 #include "fence.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define CC_CAPTURE_MAX_REQUESTS 256U
 #define CC_CAPTURE_MAX_FDS (16U + 3U * CC_CAPTURE_MAX_REQUESTS)
@@ -27,6 +29,7 @@ struct cc_request {
     bool have_vc4;
     cc_vc4_tuning vc4;
     cc_control *controls;
+    int *control_fds; /* Owned native lens-shading descriptors, separate from mutable payloads. */
     size_t num_controls;
     cc_control sensor_controls[CC_SENSOR_MAX_CONTROLS];
     size_t num_sensor_controls;
@@ -272,7 +275,11 @@ fail:
 
 static void free_controls(cc_request *r)
 {
-    for (size_t i = 0; i < r->num_controls; ++i) free(r->controls[i].data);
+    for (size_t i = 0; i < r->num_controls; ++i) {
+        if (r->control_fds[i] >= 0) close(r->control_fds[i]);
+        free(r->controls[i].data);
+    }
+    free(r->control_fds); r->control_fds = NULL;
     free(r->controls); r->controls = NULL; r->num_controls = 0;
 }
 
@@ -351,6 +358,25 @@ int cc_capture_get_sensor(cc_capture *c, const cc_sensor_model **model)
     if (!c) return -EINVAL;
     if (c->dead) return -ENODEV;
     return c->devices.frontend ? cc_cfe_get_sensor(c->devices.frontend, model) : cc_camera_get_sensor(c->devices.camera, model);
+}
+int cc_capture_get_properties(cc_capture *c, cc_camera_properties *properties)
+{
+    if (!c || !properties) return -EINVAL;
+    if (c->dead) return -ENODEV;
+    return c->devices.frontend ? cc_cfe_get_properties(c->devices.frontend, properties) :
+                                cc_camera_get_properties(c->devices.camera, properties);
+}
+const cc_camera_info *cc_capture_get_info(const cc_capture *c)
+{
+    if (!c || c->dead) return NULL;
+    return c->devices.frontend ? cc_cfe_get_info(c->devices.frontend):cc_camera_get_info(c->devices.camera);
+}
+int cc_capture_get_orientation(cc_capture *c, enum cc_orientation *orientation)
+{
+    if (!c || !orientation) return -EINVAL;
+    if (c->dead) return -ENODEV;
+    return c->devices.frontend ? cc_cfe_get_orientation(c->devices.frontend,orientation):
+                                cc_camera_get_orientation(c->devices.camera,orientation);
 }
 int cc_capture_get_sensor_timing(cc_capture *c, cc_sensor_timing *timing)
 {
@@ -722,6 +748,9 @@ int cc_request_set_isp_controls(cc_request *r, const cc_control *controls, size_
     if (r->owner) return -EBUSY;
     cc_control *copy = count ? calloc(count, sizeof(*copy)) : NULL;
     if (count && !copy) return -ENOMEM;
+    int *fds = count ? malloc(count * sizeof(*fds)) : NULL;
+    if (count && !fds) { free(copy); return -ENOMEM; }
+    for (size_t i = 0; i < count; ++i) fds[i] = -1;
     int ret = 0;
     size_t n = 0;
     for (; n < count; ++n) {
@@ -731,13 +760,25 @@ int cc_request_set_isp_controls(cc_request *r, const cc_control *controls, size_
             copy[n].data = malloc(controls[n].size);
             if (!copy[n].data) { ret = -ENOMEM; break; }
             memcpy(copy[n].data, controls[n].data, controls[n].size);
+            if (controls[n].id == V4L2_CID_USER_BCM2835_ISP_LENS_SHADING) {
+                struct bcm2835_isp_lens_shading lens;
+                if (controls[n].size != sizeof(lens)) { ret = -EINVAL; break; }
+                memcpy(&lens, copy[n].data, sizeof(lens));
+                if (lens.enabled) {
+                    if (lens.dmabuf < 0) { ret = -EBADF; break; }
+                    fds[n] = fcntl(lens.dmabuf, F_DUPFD_CLOEXEC, 0);
+                    if (fds[n] < 0) { ret = -errno; break; }
+                    lens.dmabuf = fds[n];
+                } else lens.dmabuf = -1;
+                memcpy(copy[n].data, &lens, sizeof(lens));
+            }
         }
     }
     if (ret) {
-        for (size_t i = 0; i < n; ++i) free(copy[i].data);
-        free(copy); return ret;
+        for (size_t i = 0; i < count; ++i) { if (fds[i] >= 0) close(fds[i]); free(copy[i].data); }
+        free(fds); free(copy); return ret;
     }
-    free_controls(r); r->controls = copy; r->num_controls = count;
+    free_controls(r); r->controls = copy; r->control_fds = fds; r->num_controls = count;
     return 0;
 }
 int cc_request_set_sensor_controls(cc_request *r, const cc_control *controls, size_t count)
@@ -956,6 +997,7 @@ static int ipa_configuration(cc_capture *c, const cc_ipa *ipa, cc_ipa_configurat
         configuration.pipeline = c->devices.backend ? CC_IPA_PISP : CC_IPA_CFE;
         configuration.sensor_format = c->fe.sensor;
     } else if (c->devices.vc4) configuration.pipeline = CC_IPA_VC4;
+    else if (c->devices.camera && c->devices.camera->info.pipeline == CC_PIPELINE_VIMC) configuration.pipeline = CC_IPA_VIMC;
     else return -ENOTSUP;
     int ret = cc_capture_get_sensor(c, &configuration.sensor);
     if (ret < 0 && ret != -ENOTSUP && ret != -ENOENT) return ret;
@@ -1091,7 +1133,9 @@ static int finish(cc_capture *c, cc_request *r)
     r->result.status = r->result.error ? CC_REQUEST_FAILED : CC_REQUEST_COMPLETE;
     if (!r->result.error && c->ipa && !r->result.untrusted) {
         cc_frame *stats = &r->result.statistics;
-        if (stats->num_planes != 1 || !stats->planes[0].data || stats->planes[0].bytes_used < stats->planes[0].data_offset)
+        bool vimc = c->devices.camera && c->devices.camera->info.pipeline == CC_PIPELINE_VIMC;
+        if ((!vimc || stats->num_planes) &&
+            (stats->num_planes != 1 || !stats->planes[0].data || stats->planes[0].bytes_used < stats->planes[0].data_offset))
             return -EPROTO;
         cc_request *settings = effective(r);
         cc_ipa_frame frame = {.sequence=r->result.sequence,.cookie=r->cookie,.sensor=r->result.sensor,
@@ -1101,8 +1145,8 @@ static int finish(cc_capture *c, cc_request *r)
             .settings_sensor_controls=settings->sensor_controls,.num_settings_sensor_controls=settings->num_sensor_controls,
             .vc4=settings->have_vc4 ? &settings->vc4:NULL,
             .statistics_fourcc=c->statistics_format.fourcc,
-            .statistics_data=(const unsigned char *)stats->planes[0].data + stats->planes[0].data_offset,
-            .statistics_size=stats->planes[0].bytes_used - stats->planes[0].data_offset,
+            .statistics_data=stats->num_planes ? (const unsigned char *)stats->planes[0].data + stats->planes[0].data_offset : NULL,
+            .statistics_size=stats->num_planes ? stats->planes[0].bytes_used - stats->planes[0].data_offset : 0,
             .isp_controls=settings->controls,.num_isp_controls=settings->num_controls,
             .backend=settings->have_be ? &settings->be : NULL,.af=settings->af_status};
         cc_frame *embedded=&r->result.embedded;
@@ -1112,7 +1156,8 @@ static int finish(cc_capture *c, cc_request *r)
             frame.embedded_data=(const unsigned char *)embedded->planes[0].data+embedded->planes[0].data_offset;
             frame.embedded_size=embedded->planes[0].bytes_used-embedded->planes[0].data_offset;
         }
-        int ret = cc_ipa_parse_statistics(frame.statistics_fourcc, frame.statistics_data, frame.statistics_size, &frame.statistics);
+        int ret = vimc && !stats->num_planes ? 0 :
+            cc_ipa_parse_statistics(frame.statistics_fourcc, frame.statistics_data, frame.statistics_size, &frame.statistics);
         if (!ret) ret = cc_ipa_process(c->ipa, &frame, &r->result.ipa);
         if (ret < 0) return ret;
     }

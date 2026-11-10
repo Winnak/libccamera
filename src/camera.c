@@ -163,7 +163,8 @@ int cc_camera_open_io(const cc_camera_info *info, const struct cc_io *io, cc_cam
     *out = NULL;
     if (!info || !io || !info->video_path[0] ||
         !memchr(info->video_path, '\0', sizeof(info->video_path)) ||
-        !memchr(info->media_path, '\0', sizeof(info->media_path)))
+        !memchr(info->media_path, '\0', sizeof(info->media_path)) ||
+        !memchr(info->id, '\0', sizeof(info->id)) || (unsigned)info->id_type>CC_CAMERA_ID_VIDEO)
         return -EINVAL;
     if (info->pipeline != CC_PIPELINE_V4L2 && info->pipeline != CC_PIPELINE_RPI_UNICAM &&
         info->pipeline != CC_PIPELINE_RPI_CFE && info->pipeline != CC_PIPELINE_VIMC && info->pipeline != CC_PIPELINE_UVC)
@@ -224,6 +225,21 @@ int cc_camera_open_io(const cc_camera_info *info, const struct cc_io *io, cc_cam
             if (ret<0) goto fail;
             camera->sensor_stream=streams.image.stream;
         }
+    }
+    const char *model=NULL;
+    if (camera->sensor_fd>=0) {
+        struct cc_entity *sensor=cc_media_entity(camera->media,camera->info.sensor_entity);
+        if (!sensor) { ret=-ENODEV; goto fail; }
+        model=cc_entity_name(sensor);
+    }
+    camera->info.id[0]='\0'; camera->info.id_type=CC_CAMERA_ID_NONE;
+    ret=cc_camera_identify_io(io,camera->sensor_fd>=0 ? camera->sensor_fd:camera->fd,
+        0,0,camera->info.pipeline,model,&camera->info);
+    if (ret<0) {
+        if (info->id[0] || !cc_identity_unavailable(ret)) goto fail;
+    } else if (info->id[0] && (strcmp(info->id,camera->info.id) ||
+        (info->id_type!=CC_CAMERA_ID_NONE && info->id_type!=camera->info.id_type))) {
+        ret=-ESTALE; goto fail;
     }
     *out = camera;
     return 0;
@@ -315,47 +331,24 @@ int cc_camera_enum_size(cc_camera *camera, uint32_t fourcc, uint32_t index, cc_s
     int ret = cc_ioctl(&camera->io, camera->fd, VIDIOC_ENUM_FRAMESIZES, &desc);
     if (ret < 0)
         return ret == -EINVAL ? -ENOENT : ret;
+    if (desc.index != index || desc.pixel_format != fourcc)
+        return -EPROTO;
+    cc_size_range result;
     if (desc.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
-        *size = (cc_size_range) { desc.discrete.width, desc.discrete.width, 1,
+        result = (cc_size_range) { desc.discrete.width, desc.discrete.width, 1,
                                  desc.discrete.height, desc.discrete.height, 1 };
     } else if (desc.type == V4L2_FRMSIZE_TYPE_STEPWISE || desc.type == V4L2_FRMSIZE_TYPE_CONTINUOUS) {
-        *size = (cc_size_range) { desc.stepwise.min_width, desc.stepwise.max_width,
+        if (index) return -EPROTO;
+        result = (cc_size_range) { desc.stepwise.min_width, desc.stepwise.max_width,
                                  desc.stepwise.step_width, desc.stepwise.min_height,
                                  desc.stepwise.max_height, desc.stepwise.step_height };
     } else {
         return -EPROTO;
     }
-    return 0;
-}
-
-/* CSI-2 bus codes describe samples; the capture fourcc separately specifies
- * packed/unpacked memory. Preserve this distinction when configuring Unicam. */
-uint32_t cc_bayer_mbus(uint32_t fourcc)
-{
-    static const struct { uint32_t fourcc, code; } formats[] = {
-#define BAYER(order) \
-        { V4L2_PIX_FMT_S##order##8, MEDIA_BUS_FMT_S##order##8_1X8 }, \
-        { V4L2_PIX_FMT_S##order##10, MEDIA_BUS_FMT_S##order##10_1X10 }, \
-        { V4L2_PIX_FMT_S##order##10P, MEDIA_BUS_FMT_S##order##10_1X10 }, \
-        { V4L2_PIX_FMT_S##order##12, MEDIA_BUS_FMT_S##order##12_1X12 }, \
-        { V4L2_PIX_FMT_S##order##12P, MEDIA_BUS_FMT_S##order##12_1X12 }, \
-        { V4L2_PIX_FMT_S##order##14, MEDIA_BUS_FMT_S##order##14_1X14 }, \
-        { V4L2_PIX_FMT_S##order##14P, MEDIA_BUS_FMT_S##order##14_1X14 }, \
-        { V4L2_PIX_FMT_S##order##16, MEDIA_BUS_FMT_S##order##16_1X16 }
-        BAYER(BGGR), BAYER(GBRG), BAYER(GRBG), BAYER(RGGB),
-#undef BAYER
-        { V4L2_PIX_FMT_GREY, MEDIA_BUS_FMT_Y8_1X8 },
-        { V4L2_PIX_FMT_Y10, MEDIA_BUS_FMT_Y10_1X10 },
-        { V4L2_PIX_FMT_Y10P, MEDIA_BUS_FMT_Y10_1X10 },
-        { V4L2_PIX_FMT_Y12, MEDIA_BUS_FMT_Y12_1X12 },
-        /* Y12P is also used by downstream Pi kernels with older UAPI headers. */
-        { CC_FOURCC('Y', '1', '2', 'P'), MEDIA_BUS_FMT_Y12_1X12 },
-        { V4L2_PIX_FMT_Y14, MEDIA_BUS_FMT_Y14_1X14 },
-        { V4L2_PIX_FMT_Y16, MEDIA_BUS_FMT_Y16_1X16 }
-    };
-    for (size_t i = 0; i < sizeof(formats) / sizeof(formats[0]); ++i)
-        if (formats[i].fourcc == fourcc)
-            return formats[i].code;
+    if (!result.min_width || !result.min_height || result.max_width < result.min_width ||
+        result.max_height < result.min_height || !result.width_step || !result.height_step)
+        return -EPROTO;
+    *size = result;
     return 0;
 }
 
@@ -454,7 +447,7 @@ static int configure_subdev_route(cc_camera *camera, size_t entity_index,
     return 0;
 }
 
-static int negotiate_sensor(cc_camera *camera, cc_format *format, bool active)
+static int negotiate_sensor(cc_camera *camera, cc_format *format, bool active, bool orient)
 {
     uint32_t code = cc_bayer_mbus(format->fourcc);
     if (!code)
@@ -471,10 +464,18 @@ static int negotiate_sensor(cc_camera *camera, cc_format *format, bool active)
     ret = cc_ioctl(&camera->io, camera->sensor_fd, VIDIOC_SUBDEV_S_FMT, &sf);
     if (ret < 0)
         return ret;
-    if (sf.format.code != code)
-        return -ENOTSUP;
     if (sf.pad != camera->sensor_pad || sf.stream != stream || sf.which != which)
         return -EPROTO;
+    if (sf.format.code != code) {
+        uint32_t depth, actual_depth;
+        enum cc_camera_cfa cfa, actual_cfa;
+        if (!orient || cc_bayer_code_info(code,&depth,&cfa)<0 ||
+            cc_bayer_code_info(sf.format.code,&actual_depth,&actual_cfa)<0 || depth!=actual_depth ||
+            (cfa==CC_CAMERA_CFA_MONO)!=(actual_cfa==CC_CAMERA_CFA_MONO)) return -ENOTSUP;
+        uint32_t fourcc=cc_bayer_reorder(format->fourcc,actual_cfa);
+        if (!fourcc) return -ENOTSUP;
+        format->fourcc=fourcc; code=sf.format.code;
+    }
     /* The incoming link sets a bridge's sink format. Read its selected source
      * to propagate actual pad dimensions and codes to the next bridge. */
     for (size_t i = 1; i < camera->route_count; ++i) {
@@ -511,7 +512,7 @@ static int negotiate_sensor(cc_camera *camera, cc_format *format, bool active)
     return 0;
 }
 
-static int negotiate_format(cc_camera *camera, cc_format *format, bool active)
+static int negotiate_format(cc_camera *camera, cc_format *format, bool active, bool orient)
 {
     if (!camera || !format || !format->width || !format->height || !format->fourcc ||
         format->ycbcr_enc > UINT8_MAX || format->quantization > UINT8_MAX ||
@@ -539,7 +540,7 @@ static int negotiate_format(cc_camera *camera, cc_format *format, bool active)
             if (ret < 0)
                 return ret;
         }
-        ret = negotiate_sensor(camera, &requested, active);
+        ret = negotiate_sensor(camera, &requested, active, orient);
         if (ret < 0)
             return ret;
     }
@@ -560,12 +561,49 @@ static int negotiate_format(cc_camera *camera, cc_format *format, bool active)
 
 int cc_camera_try_format(cc_camera *camera, cc_format *format)
 {
-    return negotiate_format(camera, format, false);
+    return negotiate_format(camera, format, false, false);
 }
 
 int cc_camera_configure(cc_camera *camera, cc_format *format)
 {
-    return negotiate_format(camera, format, true);
+    return negotiate_format(camera, format, true, false);
+}
+
+int cc_camera_try_format_oriented(cc_camera *camera, cc_format *format, enum cc_orientation *orientation)
+{
+    if (!camera || !format || !orientation) return -EINVAL;
+    enum cc_orientation actual=*orientation; uint32_t delta;
+    int ret=cc_camera_predict_orientation(camera,&actual,&delta);
+    if (ret<0) return ret;
+    cc_format tried=*format;
+    ret=negotiate_format(camera,&tried,false,true);
+    if (ret<0) return ret;
+    uint32_t code=cc_bayer_mbus(tried.fourcc); enum cc_camera_cfa cfa;
+    if (delta && !cc_bayer_code_info(code,NULL,&cfa) && cfa!=CC_CAMERA_CFA_MONO)
+        tried.fourcc=cc_bayer_reorder(tried.fourcc,(enum cc_camera_cfa)((uint32_t)cfa^delta));
+    *format=tried; *orientation=actual; return 0;
+}
+
+int cc_camera_configure_oriented(cc_camera *camera, cc_format *format, enum cc_orientation *orientation)
+{
+    if (!camera || !format || !orientation || !format->width || !format->height || !format->fourcc ||
+        format->ycbcr_enc>UINT8_MAX || format->quantization>UINT8_MAX || format->xfer_func>UINT8_MAX)
+        return -EINVAL;
+    int ret=cc_camera_fd(camera);
+    if (ret<0) return ret;
+    if (camera->stream->allocated || camera->stream->streaming ||
+        (camera->embedded && camera->embedded->stream->allocated)) return -EBUSY;
+    if (camera->sensor_fd>=0 && camera->info.pipeline!=CC_PIPELINE_VIMC && !cc_bayer_mbus(format->fourcc))
+        return -ENOTSUP;
+    enum cc_orientation actual=*orientation;
+    ret=cc_camera_apply_orientation(camera,&actual);
+    if (ret<0) return ret;
+    cc_format configured=*format;
+    ret=negotiate_format(camera,&configured,true,true);
+    if (!ret) ret=cc_camera_get_orientation(camera,&actual);
+    if (ret<0) { camera->stream->configured=false; return ret; }
+    *format=configured; *orientation=actual;
+    return 0;
 }
 
 static int allocate_camera(cc_camera *camera, enum cc_memory memory, uint32_t *count)

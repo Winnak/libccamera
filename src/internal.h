@@ -29,6 +29,11 @@ struct cc_io_ops {
     int (*duplicate)(void *, int);
     int (*wait_many)(void *, struct pollfd *, size_t, int);
     int (*identity)(void *, int, uint64_t *, uint64_t *);
+    int (*sysfs_read)(void *, int, const char *, char *, size_t);
+    int (*device_number)(void *, int, unsigned int *, unsigned int *);
+    int (*canonical)(void *, const char *, char *, size_t);
+    int (*read_text)(void *, const char *, char *, size_t);
+    int (*scan_nodes)(void *, char ***, size_t *); /* malloc-owned paths and array. */
 };
 struct cc_io { const struct cc_io_ops *ops; void *ctx; };
 extern const struct cc_io cc_system_io;
@@ -65,6 +70,16 @@ int cc_media_set_link(struct cc_media *media, size_t index, uint32_t flags);
 int cc_media_lens(struct cc_media *media, uint32_t sensor, struct cc_entity **lens);
 int cc_camera_open_io(const cc_camera_info *info, const struct cc_io *io, cc_camera **out);
 int cc_enumerate_media_io(const struct cc_io *io, const char *path, cc_camera_info **list, size_t *count);
+int cc_enumerate_io(const struct cc_io *io, cc_camera_info **list, size_t *count);
+int cc_camera_open_id_io(const char *id, const struct cc_io *io, cc_camera **camera);
+int cc_cfe_open_id_io(const char *id, const struct cc_io *io, cc_cfe **cfe);
+int cc_camera_find_id_io(const char *id, const struct cc_io *io, cc_camera_info *info);
+int cc_camera_identify_io(const struct cc_io *io, int fd, unsigned int major_id, unsigned int minor_id,
+    enum cc_pipeline pipeline, const char *model, cc_camera_info *info);
+bool cc_identity_unavailable(int error);
+void cc_camera_model(char *out, size_t capacity, const char *name, size_t length, bool sensor);
+size_t cc_camera_model_length(const char *name, size_t length, bool sensor);
+int cc_sensor_mode_properties(cc_camera *camera, uint32_t cfa_flip, cc_camera_properties *properties);
 struct cc_request;
 int cc_request_set_buffer_io(struct cc_request *request, unsigned int stream,
                              const cc_dmabuf_plane *planes, uint32_t num_planes, const struct cc_io *io);
@@ -129,6 +144,21 @@ size_t cc_vc4_pending_fds(const cc_vc4_isp *isp, struct pollfd *fds);
 size_t cc_be_pending_fds(const cc_pisp_be *be, struct pollfd *fds);
 int cc_camera_change_link(cc_camera *camera, size_t index, uint32_t flags);
 uint32_t cc_bayer_mbus(uint32_t fourcc);
+uint32_t cc_bayer_code(uint32_t depth, enum cc_camera_cfa cfa);
+int cc_bayer_code_info(uint32_t code, uint32_t *depth, enum cc_camera_cfa *cfa);
+uint32_t cc_bayer_reorder(uint32_t fourcc, enum cc_camera_cfa cfa);
+uint32_t cc_bayer_fourcc(uint32_t code, bool packed);
+int cc_camera_predict_orientation(cc_camera *camera, enum cc_orientation *orientation, uint32_t *cfa_delta);
+cc_camera *cc_cfe_source(cc_cfe *cfe);
+int cc_cfe_configuration_ready(cc_cfe *cfe);
+int cc_vc4_configuration_ready(cc_vc4_isp *isp);
+int cc_be_configuration_ready(cc_pisp_be *be);
+uint32_t cc_be_hardware_version(const cc_pisp_be *be);
+void cc_cfe_invalidate_configuration(cc_cfe *cfe);
+void cc_vc4_invalidate_configuration(cc_vc4_isp *isp);
+void cc_be_invalidate_configuration(cc_pisp_be *be);
+int cc_sensor_property_control(cc_camera *camera, uint32_t id, uint32_t type, cc_control_info *info);
+int cc_camera_apply_orientation(cc_camera *camera, enum cc_orientation *orientation);
 uint32_t cc_cfe_output_fourcc(uint32_t sensor_fourcc);
 
 struct cc_camera {

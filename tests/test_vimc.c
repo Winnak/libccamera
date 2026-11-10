@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "internal.h"
+#include <ccamera/configuration.h>
 #include "subdev_compat.h"
 #include "media_v2_driver.h"
 #include <ccamera/capture.h>
+#include <ccamera/ipa_vimc.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
@@ -14,6 +16,16 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"%s:%d: %s\n",__FILE__,__LINE__,#x); exit(1); } } while (0)
 #define OK(x) CHECK((x)==0)
 #define ERROR(x,e) CHECK((x)==-(e))
+static const char *proxy_worker;
+static void attach_ipa(cc_capture *capture)
+{
+    if (!proxy_worker) return;
+    const char configuration[] = "VIMC mock configuration";
+    cc_ipa_vimc_options controller = {configuration, sizeof(configuration), -1, CC_IPA_VIMC_INIT, CC_IPA_VIMC_FLAG2};
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker}; cc_ipa *ipa = NULL; uint32_t flags = 0;
+    OK(cc_ipa_vimc_create_proxy(&controller, &options, &ipa, &flags)); CHECK(flags == CC_IPA_VIMC_FLAG1);
+    OK(cc_capture_set_ipa(capture, &ipa)); CHECK(!ipa);
+}
 enum { MEDIA_FD=10, SENSOR_FD=12, DEBAYER_FD=14, RAW_FD=16, SCALER_FD=17, VIDEO_FD=18, SLOTS=3 };
 static const char *const names[]={"Sensor A","Sensor B","Debayer A","Debayer B","Raw Capture 0",
     "Raw Capture 1","Scaler","RGB/YUV Capture","RGB/YUV Input"};
@@ -110,6 +122,23 @@ static int fake_ioctl(void *context,int fd,unsigned long request,void *arg)
         CHECK(false);
     }
     if (request==CC_SD_QUERYCAP) return -ENOTTY;
+    if (request==VIDIOC_SUBDEV_G_FMT) {
+        struct cc_subdev_format *q=arg;
+        CHECK(fd==SENSOR_FD && !q->pad && !q->stream && q->which==V4L2_SUBDEV_FORMAT_ACTIVE);
+        q->format=(struct v4l2_mbus_framefmt){.code=MEDIA_BUS_FMT_SGRBG8_1X8,.width=640,.height=480}; return 0;
+    }
+    if (request==VIDIOC_SUBDEV_ENUM_MBUS_CODE) {
+        struct cc_subdev_mbus_code_enum *q=arg;
+        CHECK(fd==SENSOR_FD && !q->pad && !q->stream && q->which==V4L2_SUBDEV_FORMAT_ACTIVE);
+        if (q->index) return -EINVAL;
+        q->code=MEDIA_BUS_FMT_SGRBG8_1X8; return 0;
+    }
+    if (request==VIDIOC_SUBDEV_ENUM_FRAME_SIZE) {
+        struct cc_subdev_frame_size_enum *q=arg;
+        CHECK(fd==SENSOR_FD && !q->pad && !q->stream && q->code==MEDIA_BUS_FMT_SGRBG8_1X8 && q->which==V4L2_SUBDEV_FORMAT_ACTIVE);
+        if (q->index) return -EINVAL;
+        q->min_width=16; q->max_width=4096; q->min_height=16; q->max_height=2160; return 0;
+    }
     if (request==VIDIOC_SUBDEV_S_FMT) {
         struct cc_subdev_format *format=arg;
         CHECK((fd==SENSOR_FD || fd==DEBAYER_FD || fd==SCALER_FD) && format->which==V4L2_SUBDEV_FORMAT_ACTIVE && !format->stream);
@@ -153,6 +182,8 @@ static int fake_ioctl(void *context,int fd,unsigned long request,void *arg)
     }
     if (request==VIDIOC_QUERY_EXT_CTRL) {
         struct v4l2_query_ext_ctrl *q=arg; CHECK(fd==SENSOR_FD);
+        if (q->id==V4L2_CID_CAMERA_ORIENTATION || q->id==V4L2_CID_CAMERA_SENSOR_ROTATION ||
+            q->id==V4L2_CID_HFLIP || q->id==V4L2_CID_VFLIP) return -EINVAL;
         CHECK(q->id>=V4L2_CID_BRIGHTNESS && q->id<=V4L2_CID_SATURATION);
         *q=(struct v4l2_query_ext_ctrl){.id=q->id,.type=V4L2_CTRL_TYPE_INTEGER,.minimum=0,.maximum=255,.step=1,.default_value=128};
         strcpy(q->name,"VIMC image control"); return 0;
@@ -225,8 +256,25 @@ static int fake_duplicate(void *context,int fd)
     int duplicate=f->next_fd++; f->opened[duplicate]=true; ++f->opens; return duplicate;
 }
 static int fake_now(void *context,uint64_t *now) { (void)context; *now=0; return 0; }
+static int fake_device_number(void *context,int fd,unsigned int *major_id,unsigned int *minor_id)
+{
+    CHECK(((struct fake *)context)->opened[fd] && fd==SENSOR_FD);
+    *major_id=81; *minor_id=2; return 0;
+}
+static int fake_canonical(void *context,const char *path,char *out,size_t capacity)
+{
+    (void)context;
+    if (strcmp(path,"/sys/dev/char/81:2/device")) return -ENOENT;
+    const char *physical="/sys/devices/platform/vimc.0";
+    CHECK(strlen(physical)<capacity); memcpy(out,physical,strlen(physical)+1); return 0;
+}
+static int fake_read_text(void *context,const char *path,char *out,size_t capacity)
+{
+    (void)context; (void)path; (void)out; (void)capacity; return -ENOENT;
+}
 static const struct cc_io_ops ops={.open=fake_open,.close=fake_close,.ioctl=fake_ioctl,.map=fake_map,.unmap=fake_unmap,
-    .lock=fake_lock,.resolve=fake_resolve,.duplicate=fake_duplicate,.now=fake_now};
+    .lock=fake_lock,.resolve=fake_resolve,.duplicate=fake_duplicate,.now=fake_now,
+    .device_number=fake_device_number,.canonical=fake_canonical,.read_text=fake_read_text};
 static cc_camera_info camera_info(void)
 {
     cc_camera_info info={.pipeline=CC_PIPELINE_VIMC,.sensor_entity=2};
@@ -248,6 +296,7 @@ static void test_formats(uint32_t version,bool v2)
     struct fake f=fake_new(version,v2); struct cc_io io={&ops,&f}; cc_camera_info *list=NULL; size_t n=0;
     OK(cc_enumerate_media_io(&io,"/dev/media-vimc",&list,&n));
     CHECK(n==1 && list[0].pipeline==CC_PIPELINE_VIMC && list[0].sensor_entity==2 && !strcmp(list[0].video_path,"/dev/vimc-8"));
+    CHECK(list[0].id_type==CC_CAMERA_ID_PLATFORM && !strcmp(list[0].id,"platform/vimc.0 Sensor B"));
     cc_camera_list_free(list); clean(&f);
     cc_camera *camera=open_camera(&f); cc_format_info desc; cc_size_range sizes;
     OK(cc_camera_enum_format(camera,0,&desc)); CHECK(desc.fourcc==V4L2_PIX_FMT_RGB24);
@@ -282,6 +331,18 @@ static void test_formats(uint32_t version,bool v2)
     CHECK(!memcmp(saved_pads,f.pads,sizeof(saved_pads)) && !memcmp(saved_pixels,f.pixels,sizeof(saved_pixels)));
     cc_sensor_timing timing; ERROR(cc_camera_get_sensor_timing(camera,&timing),ENOTSUP);
     cc_embedded_configuration embedded={0}; ERROR(cc_camera_configure_embedded(camera,&embedded),ENOTSUP);
+    cc_capture_devices devices={.camera=camera}; cc_pipeline_configuration configuration;
+    const enum cc_stream_role roles[]={CC_ROLE_VIEWFINDER,CC_ROLE_RAW};
+    CHECK(cc_pipeline_generate_configuration(&devices,roles,2,&configuration)>=0);
+    CHECK(configuration.num_streams==1 && configuration.streams[0].format.fourcc==V4L2_PIX_FMT_RGB24 &&
+        configuration.streams[0].format.width==1920 && configuration.streams[0].format.height==1080);
+    CHECK(cc_pipeline_validate_configuration(&devices,&configuration)==CC_CONFIGURATION_VALID);
+    configuration.streams[0].format=(cc_format){.fourcc=UINT32_MAX,.width=UINT32_MAX,.height=1};
+    configuration.orientation=CC_ORIENTATION_ROTATE_180;
+    CHECK(cc_pipeline_validate_configuration(&devices,&configuration)==CC_CONFIGURATION_ADJUSTED);
+    CHECK(configuration.streams[0].format.width==sizes.max_width && configuration.streams[0].format.height==sizes.min_height &&
+        configuration.orientation==CC_ORIENTATION_ROTATE_0);
+    CHECK(cc_pipeline_configure(&devices,&configuration)>=0);
     cc_camera_close(camera); clean(&f);
 }
 static void test_controls(void)
@@ -313,7 +374,9 @@ static void test_controls(void)
 static void test_capture(bool imports,bool v2)
 {
     struct fake f=fake_new(0x060c00,v2); cc_camera *camera=open_camera(&f); cc_format format=format_new();
-    OK(cc_camera_configure(camera,&format)); uint32_t count=SLOTS;
+    enum cc_orientation orientation=CC_ORIENTATION_ROTATE_90;
+    OK(cc_camera_configure_oriented(camera,&format,&orientation)); CHECK(orientation==CC_ORIENTATION_ROTATE_0);
+    uint32_t count=SLOTS;
     if (imports) {
         OK(cc_camera_prepare_imports(camera,&count));
         for (uint32_t i=0;i<count;++i) {
@@ -327,6 +390,12 @@ static void test_capture(bool imports,bool v2)
     }
     ERROR(cc_camera_configure(camera,&format),EBUSY);
     cc_capture_devices devices={.camera=camera}; cc_capture *capture=NULL; OK(cc_capture_create(&devices,&capture,&count));
+    attach_ipa(capture);
+    cc_camera_properties properties; OK(cc_capture_get_properties(capture,&properties));
+    CHECK(!strcmp(cc_capture_get_info(capture)->id,"platform/vimc.0 Sensor B"));
+    OK(cc_capture_get_orientation(capture,&orientation)); CHECK(orientation==CC_ORIENTATION_ROTATE_0);
+    CHECK(!strcmp(properties.model,"Sensor B") && properties.pixel_array_width==4096 &&
+        properties.pixel_array_height==2160 && !(properties.flags&CC_CAMERA_PROPERTY_CFA));
     cc_request *requests[SLOTS]; const cc_capture_result *held=NULL; int before=f.writes;
     for (uint32_t i=0;i<SLOTS;++i) {
         OK(cc_request_create(100+i,&requests[i]));
@@ -415,6 +484,7 @@ static void test_failures(void)
         struct fake f=fake_new(0x060c00,true); cc_camera *camera=open_camera(&f); cc_format format=format_new();
         OK(cc_camera_configure(camera,&format)); uint32_t count=SLOTS; OK(cc_camera_allocate_buffers(camera,&count));
         cc_capture_devices devices={.camera=camera}; cc_capture *capture=NULL; OK(cc_capture_create(&devices,&capture,&count));
+        attach_ipa(capture);
         cc_request *request,*waiting; OK(cc_request_create(1,&request)); OK(cc_request_create(2,&waiting));
         cc_vimc_controls controls={.flags=1,.brightness=0}; OK(cc_request_set_vimc_controls(request,&controls));
         OK(cc_capture_queue(capture,request)); OK(cc_capture_queue(capture,waiting));
@@ -431,8 +501,17 @@ static void test_failures(void)
         cc_capture_close(capture); OK(cc_request_destroy(request)); OK(cc_request_destroy(waiting)); clean(&f);
     }
 }
-int main(void)
+int main(int argc, char **argv)
 {
+    CHECK(argc == 1 || argc == 2);
+    if (argc == 2) {
+        proxy_worker = argv[1]; cc_ipa *probe = NULL; uint32_t flags;
+        const char config[] = "mock"; cc_ipa_vimc_options controller = {config, sizeof(config), -1, CC_IPA_VIMC_INIT, 0};
+        cc_ipa_proxy_options options = {.worker_path = proxy_worker};
+        int ret = cc_ipa_vimc_create_proxy(&controller, &options, &probe, &flags);
+        if (ret == -ENOSYS || ret == -EPERM || ret == -EACCES) return 77;
+        OK(ret); cc_ipa_destroy(probe);
+    }
     const uint32_t versions[]={0x050500,0x050600,0x050700,0x050f00,0x051000,0x060c00};
     for (size_t i=0;i<sizeof(versions)/sizeof(versions[0]);++i) for (int v2=0;v2<2;++v2) test_formats(versions[i],v2!=0);
     test_controls();

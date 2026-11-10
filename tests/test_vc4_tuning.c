@@ -2,6 +2,7 @@
 #include "internal.h"
 #include "subdev_compat.h"
 #include <ccamera/capture.h>
+#include <ccamera/ipa_proxy.h>
 #include <errno.h>
 #include <linux/videodev2.h>
 #include <math.h>
@@ -16,6 +17,13 @@
         }                                                                                                    \
     } while (0)
 #define OK(x) CHECK((x) == 0)
+static const char *proxy_worker;
+static int create_controller(const cc_ipa_vc4_options *controller, cc_ipa **ipa)
+{
+    if (!proxy_worker) return cc_ipa_vc4_create(controller, ipa);
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker};
+    return cc_ipa_vc4_create_proxy(controller, &options, ipa);
+}
 static cc_sensor_geometry geometry(void)
 {
     return (cc_sensor_geometry){
@@ -170,7 +178,7 @@ static void controller(void)
 {
     cc_ipa *ipa = NULL;
     cc_ipa_configuration c = configuration();
-    OK(cc_ipa_vc4_create(NULL, &ipa));
+    OK(create_controller(NULL, &ipa));
     OK(cc_ipa_configure(ipa, &c));
     OK(cc_ipa_start(ipa));
     cc_ipa_request request = {.timing = c.timing, .timing_limits = c.timing_limits};
@@ -230,18 +238,18 @@ static void controller(void)
     OK(cc_ipa_start(ipa));
     cc_ipa_destroy(ipa);
     c.pipeline = CC_IPA_PISP;
-    OK(cc_ipa_vc4_create(NULL, &ipa));
+    OK(create_controller(NULL, &ipa));
     CHECK(cc_ipa_configure(ipa, &c) == -ENOTSUP);
     cc_ipa_destroy(ipa);
     cc_ipa_vc4_options bad = {.mains_hz = 42};
-    CHECK(cc_ipa_vc4_create(&bad, &ipa) == -EINVAL && !ipa);
+    CHECK(create_controller(&bad, &ipa) == -EINVAL && !ipa);
 }
 static void feedback(void)
 {
     cc_ipa_configuration c = configuration();
     cc_ipa_vc4_options o = {.mains_hz = 50, .red_gain = 1, .blue_gain = 1};
     cc_ipa *ipa;
-    OK(cc_ipa_vc4_create(&o, &ipa));
+    OK(create_controller(&o, &ipa));
     OK(cc_ipa_configure(ipa, &c));
     OK(cc_ipa_start(ipa));
     cc_ipa_request request = {.timing = c.timing, .timing_limits = c.timing_limits};
@@ -287,8 +295,15 @@ static void feedback(void)
     cc_ipa_destroy(ipa);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    CHECK(argc == 1 || argc == 2);
+    if (argc == 2) {
+        proxy_worker = argv[1]; cc_ipa *probe = NULL;
+        int ret = create_controller(NULL, &probe);
+        if (ret == -ENOSYS || ret == -EPERM || ret == -EACCES) return 77;
+        OK(ret); cc_ipa_destroy(probe);
+    }
     live_geometry();
     profile();
     flicker();

@@ -71,21 +71,9 @@ static int compare_ratio(uint64_t a, uint32_t b, uint64_t c, uint32_t d)
 
 static uint32_t raw_depth(uint32_t code)
 {
-    switch (code) {
-#define DEPTH(bits) \
-    case MEDIA_BUS_FMT_SBGGR##bits##_1X##bits: \
-    case MEDIA_BUS_FMT_SGBRG##bits##_1X##bits: \
-    case MEDIA_BUS_FMT_SGRBG##bits##_1X##bits: \
-    case MEDIA_BUS_FMT_SRGGB##bits##_1X##bits: \
-    case MEDIA_BUS_FMT_Y##bits##_1X##bits: return bits
-    DEPTH(8);
-    DEPTH(10);
-    DEPTH(12);
-    DEPTH(14);
-    DEPTH(16);
-#undef DEPTH
-    default: return 0;
-    }
+    uint32_t depth=0;
+    (void)cc_bayer_code_info(code,&depth,NULL);
+    return depth;
 }
 
 static double rpi_error(double desired, double actual)
@@ -195,4 +183,49 @@ int cc_camera_select_rpi_sensor_mode(cc_camera *camera, const cc_rpi_sensor_mode
     cc_sensor_mode_request generic={.mbus_codes=request->mbus_codes,.num_mbus_codes=request->num_mbus_codes,
         .width=request->width,.height=request->height};
     return select_mode(camera,&generic,request->bit_depth,out);
+}
+
+/* Same bounded enumeration as selection, including arbitrary image streams.
+ * Largest Size and lowest Bayer code follow the reference's sorted traversal. */
+int cc_sensor_mode_properties(cc_camera *camera, uint32_t cfa_flip, cc_camera_properties *p)
+{
+    cc_sensor_streams streams;
+    int ret=cc_camera_get_sensor_streams(camera,&streams);
+    if (ret < 0) return ret;
+    uint32_t seen[CC_SENSOR_MODE_CODE_LIMIT], total_sizes=0, cfa_code=UINT32_MAX;
+    uint64_t best_area=0;
+    for (uint32_t c=0; ; ++c) {
+        uint32_t code;
+        ret=enum_code(camera,&streams.image,c,&code);
+        if (ret == -ENOENT) break;
+        if (ret < 0) return ret;
+        if (c == CC_SENSOR_MODE_CODE_LIMIT) return -E2BIG;
+        for (uint32_t i=0; i<c; ++i) if (seen[i] == code) return -EPROTO;
+        seen[c]=code;
+        for (uint32_t s=0; ; ++s) {
+            cc_sensor_mode mode;
+            ret=enum_size(camera,&streams.image,code,s,&mode);
+            if (ret == -ENOENT) break;
+            if (ret < 0) return ret;
+            if (total_sizes++ == CC_SENSOR_MODE_SIZE_LIMIT) return -E2BIG;
+            uint64_t area=(uint64_t)mode.sizes.max_width*mode.sizes.max_height;
+            if (area > best_area || (area == best_area && mode.sizes.max_width > p->pixel_array_width)) {
+                p->pixel_array_width=mode.sizes.max_width;
+                p->pixel_array_height=mode.sizes.max_height;
+                best_area=area;
+                p->flags|=CC_CAMERA_PROPERTY_PIXEL_ARRAY;
+            }
+            enum cc_camera_cfa cfa;
+            if (camera->info.pipeline != CC_PIPELINE_VIMC && !cc_bayer_code_info(code,NULL,&cfa)) {
+                /* Drivers can advertise the live flipped Bayer code. Undo
+                 * layout-changing flips before applying upstream code order. */
+                if (cfa!=CC_CAMERA_CFA_MONO) cfa=(enum cc_camera_cfa)((uint32_t)cfa^cfa_flip);
+                uint32_t native_code=cc_bayer_code(raw_depth(code),cfa);
+                if (native_code<cfa_code) {
+                    p->cfa=cfa; cfa_code=native_code; p->flags|=CC_CAMERA_PROPERTY_CFA;
+                }
+            }
+        }
+    }
+    return 0;
 }

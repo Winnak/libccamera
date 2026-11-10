@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <ccamera/ipa.h>
+#include <ccamera/ipa_proxy.h>
 #include <ccamera/linux/bcm2835-isp.h>
 #include <ccamera/linux/pisp/pisp_fe_statistics.h>
 #include <linux/videodev2.h>
@@ -12,6 +13,13 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 #define OK(x) CHECK((x) == 0)
 #define ERROR(x,e) CHECK((x) == -(e))
+static const char *proxy_worker;
+static int create_reference(const cc_ipa_reference_tuning *tuning, cc_ipa **ipa)
+{
+    if (!proxy_worker) return cc_ipa_reference_create(tuning, ipa);
+    cc_ipa_proxy_options options = {.worker_path = proxy_worker};
+    return cc_ipa_reference_create_proxy(tuning, &options, ipa);
+}
 static int close_to(double a, double b) { double d = a > b ? a-b : b-a; return d < 1e-8; }
 static int64_t value(const cc_control *controls, size_t count, uint32_t id)
 {
@@ -135,7 +143,7 @@ static void test_reference(void)
 {
     cc_ipa_configuration c = configuration();
     cc_ipa_reference_tuning t = tuning(); cc_ipa *ipa;
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     cc_ipa_request request = {0}; cc_ipa_settings s;
     OK(cc_ipa_prepare(ipa,&request,&s));
     CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE) == 100);
@@ -152,7 +160,7 @@ static void test_reference(void)
     CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE) == 100);
     cc_ipa_destroy(ipa);
     c=configuration(); c.initial_controls[0].value=490;
-    t=tuning(); OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    t=tuning(); OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     request.timing=c.timing; request.timing.vblank=0;
     OK(cc_ipa_prepare(ipa,&request,&s));
     CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE)==476);
@@ -162,7 +170,7 @@ static void test_reference(void)
     CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE)==490);
     cc_ipa_destroy(ipa); request=(cc_ipa_request){0}; c=configuration();
     t.max_exposure_ns = 200000;
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     OK(cc_ipa_prepare(ipa,&request,&s));
     CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE) == 20);
     f = observation(&s,0.01); OK(cc_ipa_process(ipa,&f,&m)); OK(cc_ipa_prepare(ipa,&request,&s));
@@ -172,7 +180,7 @@ static void test_reference(void)
     /* Closed loop against an independent exposure/gain plant, with non-unit
      * damping and native quantization. It must converge rather than oscillate. */
     t = tuning(); t.exposure_speed=0.5; c.initial_controls[0].value=10;
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     for (unsigned i = 0; i < 40; ++i) {
         OK(cc_ipa_prepare(ipa,&request,&s));
         double lines = (double)value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE);
@@ -187,7 +195,7 @@ static void test_pisp_and_invalid(void)
 {
     cc_ipa_configuration c = configuration(); c.pipeline=CC_IPA_PISP; c.statistics_fourcc=CC_FOURCC('R','P','F','S');
     cc_ipa_reference_tuning t=tuning(); t.flags=CC_IPA_REFERENCE_AWB; cc_ipa *ipa;
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     cc_ipa_request request={0}; cc_ipa_settings s; cc_ipa_metadata m;
     OK(cc_ipa_prepare(ipa,&request,&s)); cc_ipa_frame f=observation(&s,0);
     OK(cc_ipa_process(ipa,&f,&m)); OK(cc_ipa_prepare(ipa,&request,&s));
@@ -200,21 +208,21 @@ static void test_pisp_and_invalid(void)
     struct pisp_be_tiles_config tiles; OK(cc_pisp_be_build_configuration(&be,&s.backend,&tiles));
     CHECK(tiles.config.wbg.gain_r == 4096);
     cc_ipa_destroy(ipa);
-    t.target_luminance=0; ERROR(cc_ipa_reference_create(&t,&ipa),EINVAL); CHECK(!ipa);
-    t=tuning(); t.max_colour_gain=5; ERROR(cc_ipa_reference_create(&t,&ipa),EINVAL);
-    t=tuning(); c.pipeline=CC_IPA_CFE; OK(cc_ipa_reference_create(&t,&ipa)); ERROR(cc_ipa_configure(ipa,&c),ENOTSUP);
+    t.target_luminance=0; ERROR(create_reference(&t,&ipa),EINVAL); CHECK(!ipa);
+    t=tuning(); t.max_colour_gain=5; ERROR(create_reference(&t,&ipa),EINVAL);
+    t=tuning(); c.pipeline=CC_IPA_CFE; OK(create_reference(&t,&ipa)); ERROR(cc_ipa_configure(ipa,&c),ENOTSUP);
     cc_ipa_destroy(ipa);
     c=configuration(); c.sensor_controls[0].flags=V4L2_CTRL_FLAG_READ_ONLY;
-    OK(cc_ipa_reference_create(&t,&ipa)); ERROR(cc_ipa_configure(ipa,&c),ENOTSUP); cc_ipa_destroy(ipa);
+    OK(create_reference(&t,&ipa)); ERROR(cc_ipa_configure(ipa,&c),ENOTSUP); cc_ipa_destroy(ipa);
     c=configuration(); c.red_balance.maximum=0;
-    OK(cc_ipa_reference_create(&t,&ipa)); ERROR(cc_ipa_configure(ipa,&c),ENOTSUP); cc_ipa_destroy(ipa);
+    OK(create_reference(&t,&ipa)); ERROR(cc_ipa_configure(ipa,&c),ENOTSUP); cc_ipa_destroy(ipa);
 }
 static void test_af_update_rate(void)
 {
     for (unsigned int timed=0;timed<2;++timed) {
         cc_af_tuning af; cc_af_reference_tuning(&af); af.speeds[0].pdaf_gain=0;
         cc_ipa_reference_tuning t=tuning(); t.flags=CC_IPA_REFERENCE_AF; t.af=&af;
-        cc_ipa *ipa; OK(cc_ipa_reference_create(&t,&ipa));
+        cc_ipa *ipa; OK(create_reference(&t,&ipa));
         cc_ipa_configuration c=configuration();
         c.lens=(cc_control_info){.id=V4L2_CID_FOCUS_ABSOLUTE,.type=V4L2_CTRL_TYPE_INTEGER,
             .minimum=0,.maximum=1023,.step=1,.elems=1};
@@ -245,7 +253,7 @@ static void test_embedded_hdr_feedback(void)
     c.embedded=(cc_embedded_configuration){.bits_per_pixel=10,.format={.fourcc=CC_FOURCC('S','E','N','S'),
         .width=1024,.height=4,.num_planes=1,.planes={{1024,4096}}}};
     cc_ipa_reference_tuning t=tuning(); t.flags=CC_IPA_REFERENCE_AE;
-    cc_ipa *ipa; OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    cc_ipa *ipa; OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     cc_ipa_request request={0}; cc_ipa_settings settings; OK(cc_ipa_prepare(ipa,&request,&settings));
     uint8_t packet[4096]={0};
     for (size_t i=0;i<137;++i) packet[3072+i*5+3]=0x55;
@@ -276,7 +284,7 @@ static void test_duration_planning(void)
     cc_ipa_configuration c=planning_configuration();
     cc_ipa_reference_tuning t=tuning(); t.flags=CC_IPA_REFERENCE_AE;
     t.min_frame_duration_ns=5000000; t.max_frame_duration_ns=20000000;
-    cc_ipa *ipa; OK(cc_ipa_reference_create(&t,&ipa));
+    cc_ipa *ipa; OK(create_reference(&t,&ipa));
     CHECK(cc_ipa_get_capabilities(ipa)==CC_IPA_CAP_SENSOR_TIMING);
     OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     cc_ipa_request request={0}; cc_ipa_settings s; cc_ipa_metadata m;
@@ -304,7 +312,7 @@ static void test_duration_planning(void)
         if (i==1) c.sensor_delays[2].frames=1;
         if (i==2) c.timing_limits.pixel_rate=0;
         if (i==3) c.timing_limits.exposure_step=2;
-        OK(cc_ipa_reference_create(&t,&ipa)); CHECK(cc_ipa_configure(ipa,&c)<0); cc_ipa_destroy(ipa);
+        OK(create_reference(&t,&ipa)); CHECK(cc_ipa_configure(ipa,&c)<0); cc_ipa_destroy(ipa);
     }
     c=planning_configuration(); c.num_sensor_controls=4;
     c.sensor_controls[3]=range(V4L2_CID_HBLANK,360,1360);
@@ -313,7 +321,7 @@ static void test_duration_planning(void)
     c.timing_limits.max_hblank=1360; c.timing_limits.max_vblank=20;
     c.sensor_controls[2].maximum=20;
     t.max_frame_duration_ns=10000000; c.initial_controls[0].value=400;
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     request=(cc_ipa_request){0}; OK(cc_ipa_prepare(ipa,&request,&s));
     cc_ipa_frame f=observation(&s,0); OK(cc_ipa_process(ipa,&f,&m)); OK(cc_ipa_prepare(ipa,&request,&s));
     CHECK(s.num_sensor_controls==4 && value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_HBLANK)==968);
@@ -322,7 +330,7 @@ static void test_duration_planning(void)
     OK(cc_ipa_prepare(ipa,&request,&s)); CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_HBLANK)==360);
     cc_ipa_destroy(ipa);
     c=planning_configuration(); OK(cc_sensor_lookup("imx296",&c.sensor));
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     overrides[0].value=400;
     OK(cc_ipa_prepare(ipa,&request,&s)); CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_EXPOSURE)==400);
     CHECK(value(s.sensor_controls,s.num_sensor_controls,V4L2_CID_VBLANK)>=119);
@@ -331,7 +339,7 @@ static void test_duration_planning(void)
     c.sensor_controls[0].maximum=452; c.initial_controls[0].value=400;
     c.sensor_controls[2].maximum=c.timing_limits.max_vblank=9999520;
     t.max_frame_duration_ns=UINT64_C(100000000000);
-    OK(cc_ipa_reference_create(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
+    OK(create_reference(&t,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
     request=(cc_ipa_request){0};
     for (unsigned int i=0;i<13;++i) {
         OK(cc_ipa_prepare(ipa,&request,&s));
@@ -342,10 +350,18 @@ static void test_duration_planning(void)
         f=observation(&s,0); OK(cc_ipa_process(ipa,&f,&m)); CHECK(m.exposure_ns==(uint64_t)lines*10000);
     }
     cc_ipa_destroy(ipa);
-    t.min_frame_duration_ns=0; ERROR(cc_ipa_reference_create(&t,&ipa),EINVAL); CHECK(!ipa);
+    t.min_frame_duration_ns=0; ERROR(create_reference(&t,&ipa),EINVAL); CHECK(!ipa);
 }
-int main(void)
+int main(int argc, char **argv)
 {
+    CHECK(argc == 1 || argc == 2);
+    if (argc == 2) {
+        proxy_worker = argv[1]; cc_ipa *probe = NULL;
+        cc_ipa_proxy_options options = {.worker_path = proxy_worker};
+        int ret = cc_ipa_vc4_create_proxy(NULL, &options, &probe);
+        if (ret == -ENOSYS || ret == -EPERM || ret == -EACCES) return 77;
+        OK(ret); cc_ipa_destroy(probe);
+    }
     test_embedded_hdr_feedback(); test_duration_planning();
     test_statistics(); test_lifecycle(); test_reference(); test_pisp_and_invalid(); test_af_update_rate();
     puts("C IPA ABI/lifecycle, native statistics, AE/AGC/AWB convergence, quantization and PiSP tuning passed");

@@ -15,7 +15,7 @@ extern "C" {
 #define CC_IPA_ABI_VERSION 5U
 #define CC_IPA_MAX_CONTROLS 32U
 typedef struct cc_ipa cc_ipa;
-enum cc_ipa_pipeline { CC_IPA_VC4 = 1, CC_IPA_CFE, CC_IPA_PISP };
+enum cc_ipa_pipeline { CC_IPA_VC4 = 1, CC_IPA_CFE, CC_IPA_PISP, CC_IPA_VIMC };
 enum cc_ipa_statistics_flags { CC_IPA_STATS_LUMA = 1U, CC_IPA_STATS_COLOUR = 2U };
 typedef struct cc_ipa_statistics {
     uint32_t flags;
@@ -101,10 +101,12 @@ typedef struct cc_ipa_frame {
  * can be serviced promptly. Callback errors are negative errno. No callbacks may
  * access device nodes directly. configure/start/prepare/process are required;
  * stop is required and destroy is optional (for caller-owned contexts).
- * prepare's ISP payload pointers must reference module-owned storage valid until
+ * prepare's ISP payload pointers and embedded native lens-shading fds must reference module-owned storage valid until
  * the next module call, not the passed settings object. The capture graph
- * deep-copies them immediately. Native blocks are inline.
- * This is not the upstream C++ IPA ABI. Loading/IPC/sandbox adapters are separate. */
+ * deep-copies them and duplicates lens-shading descriptors immediately. Native blocks are inline.
+ * Other opaque payload bytes must not contain process-local pointers/handles.
+ * Shared C modules use ipa_module.h. This is not the upstream C++ IPA ABI;
+ * Isolated C adapters are declared in ipa_proxy.h. */
 enum cc_ipa_capabilities { CC_IPA_CAP_LENS=1U, CC_IPA_CAP_SENSOR_TIMING=2U, CC_IPA_CAP_SENSOR_GEOMETRY=4U };
 typedef struct cc_ipa_ops {
     uint32_t abi_version;

@@ -69,7 +69,8 @@ typedef struct cc_capture_result {
  * graphs canonicalize exports of internal image/metadata pools for alias checks.
  * Device handles must not be used separately after adoption. */
 CC_API int cc_capture_create(cc_capture_devices *devices, cc_capture **capture, uint32_t *count);
-/* Configure/adopt a C IPA module on an idle stopped graph with statistics.
+/* Configure/adopt a C IPA module on an idle stopped graph with statistics,
+ * or the existing VIMC graph with its mock IPA.
  * Success clears *ipa; failure leaves ownership unchanged. NULL detaches and
  * destroys the previous module. Modules run only through dispatch/dequeue;
  * configure/start repeats on restart using live sensor ranges and baselines.
@@ -77,8 +78,9 @@ CC_API int cc_capture_create(cc_capture_devices *devices, cc_capture **capture, 
  * tuning overrides the whole corresponding generated tuning block. Generated
  * settings are private per-run snapshots and never alter reusable request data.
  * Sensor outputs require configured delays; explicit sequence plans cannot be
- * mixed with an attached module. Errors cancel the graph normally. No module
- * loading, background threads, IPC bridge or encoding is added. */
+ * mixed with an attached module. Errors cancel the graph normally. No implicit
+ * module selection, background threads, IPC bridge or encoding is added.
+ * Explicitly loaded C modules (ipa_module.h) have the same adoption lifecycle. */
 CC_API int cc_capture_set_ipa(cc_capture *capture, cc_ipa **ipa);
 /* Native source/sensor controls, applied immediately. They are not associated
  * with request sequences and sensor delays are not compensated. Allocated
@@ -93,6 +95,12 @@ CC_API int cc_capture_next_control(cc_capture *capture, uint32_t after_id, cc_co
 CC_API int cc_capture_get_controls(cc_capture *capture, cc_control *controls, size_t count, size_t *error_index);
 CC_API int cc_capture_set_controls(cc_capture *capture, const cc_control *controls, size_t count, size_t *error_index);
 CC_API int cc_capture_get_sensor(cc_capture *capture, const cc_sensor_model **model);
+CC_API int cc_capture_get_properties(cc_capture *capture, cc_camera_properties *properties);
+/* Borrowed source discovery/identity info; NULL for NULL or a dead graph. */
+CC_API const cc_camera_info *cc_capture_get_info(const cc_capture *capture);
+/* Orientation of the graph source. Downstream ISP output transforms, if
+ * configured separately, are additional to this sensor orientation. */
+CC_API int cc_capture_get_orientation(cc_capture *capture, enum cc_orientation *orientation);
 CC_API int cc_capture_get_sensor_timing(cc_capture *capture, cc_sensor_timing *timing);
 /* Native active interval, independent of delayed expected sensor metadata.
  * Configure intervals before allocating/adopting devices; graph timing changes
@@ -205,7 +213,9 @@ CC_API int cc_request_take_acquire_fence(cc_request *request, enum cc_capture_st
 CC_API int cc_request_set_tuning(cc_request *request, const struct pisp_fe_config *frontend,
                                 const struct pisp_be_config *backend);
 /* Native VC4 ISP controls, applied when the preceding ISP job has completed.
- * Payloads are copied. Layout-changing controls are rejected by the ISP.
+ * Payloads are copied; enabled native lens-shading DMA-BUF fds are duplicated
+ * with CLOEXEC and retained until replacement or request destruction.
+ * Layout-changing controls are rejected by the ISP.
  * These are ISP controls; sensor exposure-delay scheduling remains separate.
  * Unspecified controls retain the device's current values. NULL/0 clears. */
 CC_API int cc_request_set_vc4_tuning(cc_request *request, const cc_vc4_tuning *tuning);

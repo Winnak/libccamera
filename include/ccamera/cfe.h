@@ -43,6 +43,10 @@ typedef struct cc_cfe_result {
  * cannot run alongside a raw camera opened from the same media device.
  * This output is Bayer/mono for the PiSP backend, not RGB/YUV. */
 CC_API int cc_cfe_open(const cc_camera_info *info, cc_cfe **cfe);
+/* Fresh ID-based discovery; the selected camera must be an RPI_CFE pipeline. */
+CC_API int cc_cfe_open_by_id(const char *id, cc_cfe **cfe);
+/* Borrowed source discovery/identity info; valid until close. */
+CC_API const cc_camera_info *cc_cfe_get_info(const cc_cfe *cfe);
 CC_API void cc_cfe_close(cc_cfe *cfe);
 /* image.fourcc optionally selects PC1R/PC1G/PC1g/PC1B/PC1M or their PC2/PC3
  * equivalents with the same Bayer order as the sensor. Zero selects Bayer16/
@@ -58,6 +62,25 @@ CC_API void cc_cfe_close(cc_cfe *cfe);
  * image1 follows the same rules, with compression_offset1. Native per-request
  * tuning cannot alter either output geometry or compression contract. */
 CC_API int cc_cfe_configure(cc_cfe *cfe, cc_cfe_configuration *configuration);
+/* Negotiate the same layouts using TRY formats and routes. Active sensor/FE
+ * formats, links, controls, buffer allocations and existing configuration stay
+ * unchanged. Optional image1 is opened temporarily when needed. The live sensor
+ * flip state is used; this call does not apply an orientation. May be used with
+ * allocated buffers. Outputs stay unchanged on error. Serialize with all other
+ * calls on this frontend. Configure must still validate the actual hardware. */
+CC_API int cc_cfe_try_configuration(cc_cfe *cfe, cc_cfe_configuration *configuration);
+/* TRY validation with predicted orientation/Bayer order; no flip controls or
+ * active formats are written. Same output/error guarantees as above. */
+CC_API int cc_cfe_try_configuration_oriented(cc_cfe *cfe, cc_cfe_configuration *configuration,
+    enum cc_orientation *orientation);
+/* Copy the applied native configuration, including metadata layouts. -EPIPE
+ * before configuration or after invalidation; output unchanged on error. */
+CC_API int cc_cfe_get_configuration(cc_cfe *cfe, cc_cfe_configuration *configuration);
+/* Sensor orientation policy/application as for cc_camera_configure_oriented.
+ * Both FE output Bayer orders follow the actual sensor while their depth,
+ * packing/compression, crop and scale choices are preserved. */
+CC_API int cc_cfe_configure_oriented(cc_cfe *cfe, cc_cfe_configuration *configuration,
+                                    enum cc_orientation *orientation);
 CC_API int cc_cfe_allocate_buffers(cc_cfe *cfe, uint32_t *count);
 /* Select MMAP or imported DMABUF image storage; statistics, configuration and
  * optional embedded queues stay MMAP. Bind DMABUF images before queue. Release
@@ -103,6 +126,9 @@ CC_API int cc_cfe_next_control(cc_cfe *cfe, uint32_t after_id, cc_control_info *
 CC_API int cc_cfe_get_controls(cc_cfe *cfe, cc_control *controls, size_t count, size_t *error_index);
 CC_API int cc_cfe_set_controls(cc_cfe *cfe, const cc_control *controls, size_t count, size_t *error_index);
 CC_API int cc_cfe_get_sensor(cc_cfe *cfe, const cc_sensor_model **model);
+CC_API int cc_cfe_get_properties(cc_cfe *cfe, cc_camera_properties *properties);
+CC_API int cc_cfe_try_orientation(cc_cfe *cfe, enum cc_orientation *orientation, enum cc_transform *transform);
+CC_API int cc_cfe_get_orientation(cc_cfe *cfe, enum cc_orientation *orientation);
 /* Same read-only generic selection policy as cc_camera_select_sensor_mode. */
 CC_API int cc_cfe_select_sensor_mode(cc_cfe *cfe, const cc_sensor_mode_request *request,
                                      cc_sensor_format *format);

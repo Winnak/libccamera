@@ -57,6 +57,15 @@ CC_API void cc_pisp_be_close(cc_pisp_be *be);
  * kernels whose V4L2 nodes force unrelated defaults. No gamma is inferred from
  * a transfer-function label: callers must supply the corresponding tuning. */
 CC_API int cc_pisp_be_configure(cc_pisp_be *be, cc_pisp_be_configuration *configuration);
+/* Validate native builder limits and negotiate TRY layouts without changing
+ * active formats, buffers or the current configuration. Optional output/history
+ * nodes are opened temporarily when needed. Includes colour metadata, crops,
+ * auxiliary layouts and hardware-revision limits. May be called with allocated
+ * buffers; outputs stay unchanged on error. Configure revalidates the device. */
+CC_API int cc_pisp_be_try_configuration(cc_pisp_be *be, cc_pisp_be_configuration *configuration);
+/* Copy the applied native configuration; -EPIPE before configuration or after
+ * invalidation. Output unchanged on error. Also available with pending jobs. */
+CC_API int cc_pisp_be_get_configuration(cc_pisp_be *be, cc_pisp_be_configuration *configuration);
 CC_API int cc_pisp_be_allocate_buffers(cc_pisp_be *be, uint32_t *count);
 /* Per-image MMAP/DMABUF selection; input stays DMABUF, parameters stay MMAP.
  * Only enabled outputs are allocated. DMABUF images must be imported before

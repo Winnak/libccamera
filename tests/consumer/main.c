@@ -6,16 +6,117 @@
 #include <ccamera/pisp_be.h>
 #include <ccamera/capture.h>
 #include <ccamera/ipa.h>
+#include <ccamera/ipa_module.h>
+#include <ccamera/ipa_manager.h>
+#include <ccamera/ipa_proxy.h>
+#include <ccamera/ipa_vimc.h>
+#include <ccamera/ipc.h>
+#include <ccamera/ipc_pipe.h>
+#include <ccamera/process.h>
 #include <ccamera/embedded.h>
 #include <ccamera/vimc.h>
 #include <ccamera/uvc.h>
+#include <ccamera/monitor.h>
+#include <ccamera/configuration.h>
 #include <ccamera/linux/bcm2835-isp.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc == 2) {
+        cc_ipa_proxy_options options = {.worker_path = argv[1]}; cc_ipa *installed_proxy = NULL;
+        int ret = cc_ipa_vc4_create_proxy(NULL, &options, &installed_proxy);
+        if (ret && ret != -ENOSYS && ret != -EPERM && ret != -EACCES) return 1;
+        cc_ipa_destroy(installed_proxy);
+    } else if (argc != 1) return 1;
+    cc_process *process = NULL; cc_process_result process_result;
+    if (cc_process_spawn(NULL, &process) != -EINVAL || process || cc_process_close(NULL) ||
+        cc_process_pid(NULL) != -EINVAL || cc_process_fd(NULL) != -EINVAL ||
+        cc_process_exec_fd(NULL) != -EINVAL || cc_process_wait_exec(NULL, 0) != -EINVAL ||
+        cc_process_dispatch(NULL) != -EINVAL || cc_process_get_result(NULL, &process_result) != -EINVAL ||
+        cc_process_wait(NULL, &process_result, 0) != -EINVAL || cc_process_signal(NULL, 0) != -EINVAL) return 1;
+    cc_ipc *ipc = NULL; cc_ipc_packet *packet = NULL; cc_ipc_payload ipc_payload = {0};
+    cc_ipc_message_header ipc_header = {0}; int remote = -1; short ipc_events = 0;
+    cc_ipc_pipe *ipc_pipe = NULL;
+    if (cc_ipc_pipe_open(NULL, -1, &ipc_pipe) != -EINVAL || ipc_pipe ||
+        cc_ipc_pipe_fd(NULL) != -EINVAL || cc_ipc_pipe_peer_fd(NULL) != -EINVAL ||
+        cc_ipc_pipe_events(NULL, &ipc_events) != -EINVAL || cc_ipc_pipe_pending(NULL) ||
+        cc_ipc_pipe_dispatch(NULL) != -EINVAL || cc_ipc_pipe_send(NULL, &ipc_header, &ipc_payload) != -EINVAL ||
+        cc_ipc_pipe_receive(NULL, &packet, 0) != -EINVAL || packet ||
+        cc_ipc_pipe_call(NULL, &ipc_header, &ipc_payload, &packet, 0) != -EINVAL || packet) return 1;
+    cc_ipc_pipe_close(NULL);
+    if (cc_ipc_create(NULL, &remote) != -EINVAL || remote != -1 ||
+        cc_ipc_bind(-1, &ipc) != -EINVAL || ipc || cc_ipc_fd(NULL) != -EINVAL ||
+        cc_ipc_events(NULL, &ipc_events) != -EINVAL || cc_ipc_send(NULL, &ipc_payload) != -EINVAL ||
+        cc_ipc_send_message(NULL, &ipc_header, &ipc_payload) != -EINVAL || cc_ipc_flush(NULL) != -EINVAL ||
+        cc_ipc_receive(NULL, &packet) != -EINVAL || packet ||
+        cc_ipc_packet_header(NULL, &ipc_header) != -EINVAL || cc_ipc_packet_take_fd(NULL, 0) != -EINVAL ||
+        cc_ipc_packet_data(NULL, NULL) || cc_ipc_packet_fds(NULL, NULL)) return 1;
+    cc_ipc_packet_destroy(NULL); cc_ipc_close(NULL);
+    cc_ipa_manager *manager = NULL; cc_ipa *selected = NULL; size_t module_index = 0;
+    uint32_t vimc_flags = 123; cc_ipa_vimc_event vimc_event;
+    if (cc_ipa_vimc_create_proxy(NULL, NULL, &selected, &vimc_flags) != -EINVAL || selected || vimc_flags != 123 ||
+        cc_ipa_vimc_map_buffers(NULL, NULL, 0) != -EINVAL || cc_ipa_vimc_unmap_buffers(NULL, NULL, 0) != -EINVAL ||
+        cc_ipa_vimc_queue_request(NULL, 0, NULL, 0) != -EINVAL || cc_ipa_vimc_compute_params(NULL, 0, 0) != -EINVAL ||
+        cc_ipa_vimc_dispatch(NULL) != -EINVAL || cc_ipa_vimc_dequeue_event(NULL, &vimc_event, 0) != -EINVAL) return 1;
+    if (cc_ipa_module_create_proxy(NULL, NULL, 0, NULL, &selected) != -EINVAL || selected ||
+        cc_ipa_reference_create_proxy(NULL, NULL, &selected) != -EINVAL || selected ||
+        cc_ipa_vc4_create_proxy(NULL, NULL, NULL) != -EINVAL ||
+        cc_ipa_manager_create_proxy(NULL, "rpi/vc4", 1, 1, NULL, NULL, 0, NULL, &selected) != -EINVAL || selected) return 1;
+    if (cc_ipa_manager_open(NULL, NULL) != -EINVAL || cc_ipa_manager_count(manager) ||
+        cc_ipa_manager_get_info(manager, 0) || cc_ipa_manager_get_path(manager, 0) ||
+        cc_ipa_manager_select(manager, "rpi/vc4", 1, 1, NULL, &module_index) != -EINVAL ||
+        cc_ipa_manager_create(manager, "rpi/vc4", 1, 1, NULL, NULL, 0, &selected) != -EINVAL || selected)
+        return 1;
+    cc_ipa_manager_close(manager);
+    cc_ipa_manager_options build_only = {.flags = CC_IPA_MANAGER_BUILD_TREE};
+    if (cc_ipa_manager_open(&build_only, &manager) || cc_ipa_manager_count(manager)) return 1;
+    cc_ipa_manager_close(manager);
+    cc_ipa_module *module = NULL; cc_ipa *loaded_ipa = NULL;
+    const void *signature = NULL; size_t signature_size = 0;
+    if (cc_ipa_module_open(NULL, &module) != -EINVAL || module ||
+        cc_ipa_module_create(NULL, NULL, 0, &loaded_ipa) != -EINVAL || loaded_ipa ||
+        cc_ipa_module_match(NULL, "rpi/vc4", 0, 0) != -EINVAL ||
+        cc_ipa_module_get_signature(NULL, &signature, &signature_size) != -EINVAL ||
+        cc_ipa_module_get_info(NULL) || cc_ipa_module_get_path(NULL)) return 1;
+    cc_ipa_module_close(NULL);
+    cc_pipeline_configuration pipeline={0};
+    if (cc_pipeline_generate_configuration(NULL,NULL,0,&pipeline)!=-EINVAL ||
+        cc_pipeline_validate_configuration(NULL,&pipeline)!=-EINVAL || cc_pipeline_configure(NULL,&pipeline)!=-EINVAL ||
+        cc_camera_try_format_oriented(NULL,NULL,NULL)!=-EINVAL || cc_cfe_try_configuration_oriented(NULL,NULL,NULL)!=-EINVAL ||
+        cc_cfe_get_configuration(NULL,NULL)!=-EINVAL || cc_vc4_isp_get_configuration(NULL,NULL)!=-EINVAL ||
+        cc_pisp_be_get_configuration(NULL,NULL)!=-EINVAL) return 1;
+    if (cc_cfe_try_configuration(NULL,NULL)!=-EINVAL ||
+        cc_vc4_isp_try_configuration(NULL,NULL)!=-EINVAL ||
+        cc_pisp_be_try_configuration(NULL,NULL)!=-EINVAL) return 1;
+    cc_camera_event event;
+    cc_camera_info *snapshot=NULL; size_t camera_count=0; uint64_t generation=0;
+    if (cc_camera_monitor_open(NULL)!=-EINVAL || cc_camera_monitor_fd(NULL)!=-EINVAL ||
+        cc_camera_monitor_dispatch(NULL)!=-EINVAL || cc_camera_monitor_refresh(NULL)!=-EINVAL ||
+        cc_camera_monitor_snapshot(NULL,&snapshot,&camera_count,&generation)!=-EINVAL ||
+        cc_camera_monitor_dequeue(NULL,&event,0)!=-EINVAL) return 1;
+    cc_camera_monitor_close(NULL);
+    cc_camera *identified=NULL; cc_cfe *identified_fe=NULL;
+    if (cc_camera_open_by_id(NULL,&identified)!=-EINVAL || identified ||
+        cc_cfe_open_by_id(NULL,&identified_fe)!=-EINVAL || identified_fe ||
+        cc_cfe_get_info(NULL) || cc_capture_get_info(NULL)) return 1;
+    enum cc_orientation orientation;
+    enum cc_transform transform;
+    if (cc_orientation_from_rotation(90,&orientation) || orientation!=CC_ORIENTATION_ROTATE_90 ||
+        cc_orientation_transform(orientation,CC_ORIENTATION_ROTATE_0,&transform) || transform!=CC_TRANSFORM_ROTATE_90 ||
+        cc_transform_inverse(transform,&transform) || transform!=CC_TRANSFORM_ROTATE_270 ||
+        cc_orientation_apply(orientation,transform,&orientation) || orientation!=CC_ORIENTATION_ROTATE_0 ||
+        cc_transform_compose(CC_TRANSFORM_HFLIP,CC_TRANSFORM_TRANSPOSE,&transform) || transform!=CC_TRANSFORM_ROTATE_270 ||
+        cc_camera_try_orientation(NULL,&orientation,&transform)!=-EINVAL || cc_cfe_try_orientation(NULL,&orientation,&transform)!=-EINVAL ||
+        cc_camera_get_orientation(NULL,&orientation)!=-EINVAL || cc_cfe_get_orientation(NULL,&orientation)!=-EINVAL ||
+        cc_capture_get_orientation(NULL,&orientation)!=-EINVAL ||
+        cc_camera_configure_oriented(NULL,NULL,&orientation)!=-EINVAL || cc_cfe_configure_oriented(NULL,NULL,&orientation)!=-EINVAL) return 1;
+    cc_camera_properties properties;
+    if (cc_camera_get_properties(NULL,&properties)!=-EINVAL ||
+        cc_cfe_get_properties(NULL,&properties)!=-EINVAL ||
+        cc_capture_get_properties(NULL,&properties)!=-EINVAL) return 1;
     const uint32_t mode_code=0x300f;
     cc_sensor_mode_request mode_request={.mbus_codes=&mode_code,.num_mbus_codes=1,.width=640,.height=480};
     cc_sensor_format sensor_format;

@@ -68,7 +68,7 @@ static void print_format(const char *name, const cc_format *format)
 
 static void usage(const char *program)
 {
-    fprintf(stderr, "Usage: %s [-c index] -w width -h height -f FOURCC\n"
+    fprintf(stderr, "Usage: %s [-c index | -I ID] -w width -h height -f FOURCC\n"
             "          [-n frames] [-o bayer.raw] [-s statistics.bin] [-g] [-j]\n"
             "          [-b FE-FOURCC] [-k compression-black-level-offset]\n"
             "          [-p [-i /dev/mediaN] [-F FOURCC] [-A FOURCC] [-a auxiliary.raw]]\n"
@@ -92,17 +92,19 @@ int main(int argc, char **argv)
 {
     uint32_t index = 0, frames = 10;
     bool process = false, auxiliary = false, automatic = false, autofocus = false;
+    bool index_selected=false;
     cc_cfe_configuration configuration = {0};
     cc_format output_format = { .fourcc = CC_FOURCC('R', 'G', 'B', '3') };
     cc_format auxiliary_format = { .fourcc = CC_FOURCC('Y', 'U', '1', '2') };
     cc_rectangle crops[2] = {{0}};
     uint32_t transforms[2] = {0};
-    const char *output_path = NULL, *statistics_path = NULL, *be_path = NULL, *auxiliary_path = NULL;
+    const char *output_path = NULL, *statistics_path = NULL, *be_path = NULL, *auxiliary_path = NULL, *camera_id=NULL;
     int option;
-    while ((option = getopt(argc, argv, "pgjc:w:h:f:b:k:n:o:s:i:F:A:a:W:H:U:V:r:R:t:T:")) != -1) {
+    while ((option = getopt(argc, argv, "pgjc:I:w:h:f:b:k:n:o:s:i:F:A:a:W:H:U:V:r:R:t:T:")) != -1) {
         int ret = 0;
         switch (option) {
-        case 'c': ret = number(optarg, &index); break;
+        case 'c': index_selected=true; ret = number(optarg, &index); break;
+        case 'I': camera_id=optarg; break;
         case 'w': ret = number(optarg, &configuration.sensor.width); break;
         case 'h': ret = number(optarg, &configuration.sensor.height); break;
         case 'n': ret = number(optarg, &frames); break;
@@ -144,7 +146,8 @@ int main(int argc, char **argv)
         }
         if (ret < 0) { usage(argv[0]); return EXIT_FAILURE; }
     }
-    if (optind != argc || !configuration.sensor.width || !configuration.sensor.height ||
+    if (optind != argc || (camera_id && (index_selected || !camera_id[0] ||
+        strnlen(camera_id,CC_CAMERA_ID_MAX)==CC_CAMERA_ID_MAX)) || !configuration.sensor.width || !configuration.sensor.height ||
         !configuration.sensor.fourcc || !frames || configuration.compression_offset>UINT16_MAX ||
         (output_path && statistics_path && !strcmp(output_path, statistics_path)) ||
         (auxiliary_path && output_path && !strcmp(auxiliary_path, output_path)) ||
@@ -163,11 +166,14 @@ int main(int argc, char **argv)
     uint32_t request_count = 0;
     uint32_t be_buffers = 4;
     FILE *output = NULL, *statistics = NULL, *auxiliary_file = NULL;
-    int ret = cc_enumerate(&cameras, &count);
-    if (ret < 0)
-        goto done;
-    if (index >= count) { ret = -ENODEV; goto done; }
-    ret = cc_cfe_open(&cameras[index], &cfe);
+    int ret;
+    if (camera_id) ret=cc_cfe_open_by_id(camera_id,&cfe);
+    else {
+        ret=cc_enumerate(&cameras,&count);
+        if (ret<0) goto done;
+        if (index>=count) { ret=-ENODEV; goto done; }
+        ret=cc_cfe_open(&cameras[index],&cfe);
+    }
     if (ret < 0)
         goto done;
     ret = cc_cfe_configure(cfe, &configuration);
@@ -175,7 +181,7 @@ int main(int argc, char **argv)
         goto done;
     const cc_format *image = &configuration.image;
     fprintf(stderr, "%s FE: %ux%u fourcc=0x%08x stride=%u size=%u; statistics=%u bytes\n",
-            cameras[index].name, image->width, image->height, image->fourcc,
+            cc_cfe_get_info(cfe)->name, image->width, image->height, image->fourcc,
             image->planes[0].stride, image->planes[0].size, configuration.statistics.planes[0].size);
     uint32_t buffers = 4;
     ret = cc_cfe_allocate_buffers(cfe, &buffers);

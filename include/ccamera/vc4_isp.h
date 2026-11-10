@@ -37,6 +37,14 @@ typedef struct cc_vc4_result {
 CC_API int cc_vc4_isp_open(const char *media_path, cc_vc4_isp **isp);
 CC_API void cc_vc4_isp_close(cc_vc4_isp *isp);
 CC_API int cc_vc4_isp_configure(cc_vc4_isp *isp, cc_vc4_configuration *configuration);
+/* TRY-format negotiation without changing active formats, crop, controls,
+ * buffers or the current configuration. The returned crop is computed and
+ * checked locally; configure still applies/validates the driver's selection.
+ * May be called with allocated buffers. Outputs stay unchanged on error. */
+CC_API int cc_vc4_isp_try_configuration(cc_vc4_isp *isp, cc_vc4_configuration *configuration);
+/* Copy the applied native configuration; -EPIPE before configuration or after
+ * invalidation. Output unchanged on error. Also available with pending jobs. */
+CC_API int cc_vc4_isp_get_configuration(cc_vc4_isp *isp, cc_vc4_configuration *configuration);
 /* output[0] is required; a zero output[1] selects a small YUV420 auxiliary
  * stream. Input must match the producer's negotiated memory layout exactly.
  * Actual output/metadata layouts and crop are returned on success. */

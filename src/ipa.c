@@ -4,11 +4,14 @@
 #include <float.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include "ipa_module.h"
 
 struct cc_ipa {
     cc_ipa_ops ops;
     void *context;
     bool configured, running;
+    void *owner;
+    void (*release_owner)(void *);
 };
 
 static int controls_valid(const cc_control *controls, size_t count, bool scalar)
@@ -49,7 +52,16 @@ void cc_ipa_destroy(cc_ipa *ipa)
     if (!ipa) return;
     cc_ipa_stop(ipa);
     if (ipa->ops.destroy) ipa->ops.destroy(ipa->context);
+    if (ipa->release_owner) ipa->release_owner(ipa->owner);
     free(ipa);
+}
+void cc_ipa_set_owner(cc_ipa *ipa, void *owner, void (*release)(void *))
+{
+    ipa->owner = owner; ipa->release_owner = release;
+}
+void *cc_ipa_context(cc_ipa *ipa, int (*configure)(void *, const cc_ipa_configuration *))
+{
+    return ipa && ipa->ops.configure == configure ? ipa->context : NULL;
 }
 uint32_t cc_ipa_get_capabilities(const cc_ipa *ipa) { return ipa ? ipa->ops.capabilities:0; }
 int cc_ipa_configure(cc_ipa *ipa, const cc_ipa_configuration *configuration)
