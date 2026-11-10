@@ -70,6 +70,17 @@ typedef struct cc_sensor_mode {
     cc_size_range sizes;
 } cc_sensor_mode;
 
+typedef struct cc_sensor_format {
+    uint32_t mbus_code, width, height;
+} cc_sensor_format;
+
+typedef struct cc_sensor_mode_request {
+    const uint32_t *mbus_codes; /* Accepted codes, in tie-breaking preference order. */
+    size_t num_mbus_codes;
+    uint32_t width, height; /* Minimum sensor output dimensions, both positive. */
+    uint32_t max_width, max_height; /* Both zero for no upper bound. */
+} cc_sensor_mode_request;
+
 typedef struct cc_fraction { uint32_t numerator, denominator; } cc_fraction;
 enum cc_frame_interval_type { CC_INTERVAL_DISCRETE=1, CC_INTERVAL_CONTINUOUS=2, CC_INTERVAL_STEPWISE=3 };
 typedef struct cc_frame_interval_range {
@@ -140,6 +151,18 @@ CC_API int cc_camera_enum_format(cc_camera *camera, uint32_t index, cc_format_in
 CC_API int cc_camera_enum_size(cc_camera *camera, uint32_t fourcc, uint32_t index, cc_size_range *size);
 CC_API int cc_camera_enum_sensor_mode(cc_camera *camera, uint32_t code_index,
                                       uint32_t size_index, cc_sensor_mode *mode);
+/* Read-only generic libcamera sensor selection policy: among accepted codes,
+ * prefer the closest aspect ratio, then the smallest area, then code order.
+ * Each advertised range contributes its maximum size; intermediate sizes are
+ * not synthesized. Both dimensions must fit the request's minimum/maximum.
+ * This is distinct from the RPi pipeline's weighted size/bit-depth heuristic.
+ * No format, routing, links, controls or buffers are changed. Native negotiation
+ * is still required. Outputs stay unchanged on error: -ENOENT if no mode fits,
+ * -ENOTSUP without a sensor, -EPROTO for malformed replies, -E2BIG above 256
+ * requested/advertised codes or 4096 size ranges across accepted codes.
+ * Calls must be serialized with other operations on this camera. */
+CC_API int cc_camera_select_sensor_mode(cc_camera *camera, const cc_sensor_mode_request *request,
+                                        cc_sensor_format *format);
 /* Capture-node intervals use FOURCC and output geometry. Sensor intervals use
  * MBUS codes and sensor geometry on the discovered image pad/stream. Native
  * unsupported ioctls return -ENOTSUP; enumeration ends with -ENOENT. */

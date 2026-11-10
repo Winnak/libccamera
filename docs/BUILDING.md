@@ -107,6 +107,9 @@ metadata, missed events/write deadlines, partial failure and restart on both
 Unicam and CFE sources. Sensor-helper tests check native gain-code round trips,
 quantization against driver min/max/step, independent exponential equations,
 200 arbitrary-precision timing vectors and live model/default-delay selection.
+Sensor-mode selection checks generic ranking against 16 upstream-generated
+fixtures, large integer dimensions, arbitrary image-stream IDs, read-only
+queries and bounded/malformed driver enumeration.
 An install test links and runs an external C17 consumer using
 `find_package`, including the public ISP/CFE and native UAPI headers. No physical capture device
 is needed for these tests. Real Pi captures remain unverified in this workspace.

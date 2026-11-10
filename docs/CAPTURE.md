@@ -3,6 +3,7 @@
 [Project overview](../README.md). Run example commands from the repository root.
 
 - [Capture and ownership](#capture-and-ownership)
+- [Sensor mode selection](#sensor-mode-selection)
 - [Frame intervals](#frame-intervals)
 - [Capture requests](#capture-requests)
 - [Raspberry Pi raw capture](#raspberry-pi-raw-capture)
@@ -118,6 +119,56 @@ wait can return `-ETIMEDOUT`. Keep the V4L2 timestamp flags when interpreting th
 timestamp's clock and source, and inspect `V4L2_BUF_FLAG_ERROR` before using a
 frame. `-EPROTO` means malformed driver metadata; stop capture before proceeding.
 The buffer layout follows the [Linux V4L2 buffer API](https://docs.kernel.org/userspace-api/media/v4l/buffer.html).
+
+## Sensor mode selection
+
+`cc_camera_select_sensor_mode` chooses a sensor MBUS code and output size from
+live enumeration. Supply accepted codes in preference order and positive minimum
+width/height; set both maximum dimensions to zero for no upper bound. The
+generic libcamera policy ranks candidates by closest aspect ratio, then smallest
+area, then code preference. Each advertised range contributes its maximum size.
+It does not invent intermediate modes or accept a mode smaller than either
+requested dimension. Ratios are compared exactly and areas use 64 bits.
+
+```c
+#include <ccamera/ccamera.h>
+#include <linux/media-bus-format.h>
+#include <linux/videodev2.h>
+
+const uint32_t codes[] = { MEDIA_BUS_FMT_SRGGB10_1X10 };
+cc_sensor_mode_request request = {
+    .mbus_codes = codes, .num_mbus_codes = 1, .width = 1280, .height = 720
+};
+cc_sensor_format sensor;
+int ret = cc_camera_select_sensor_mode(camera, &request, &sensor);
+if (!ret) {
+    /* This accepted MBUS code can be stored as packed RGGB10. */
+    cc_format raw = {
+        .fourcc = V4L2_PIX_FMT_SRGGB10P, .width = sensor.width, .height = sensor.height
+    };
+    ret = cc_camera_configure(camera, &raw);
+}
+```
+
+Selection changes no formats, routes, links, controls or buffers. It can be
+queried before configuration or during capture, with calls serialized as usual.
+The result contains sensor geometry, not a negotiated buffer layout; configure
+the raw camera or the CFE sensor input separately, and use the actual returned
+format. `cc_cfe_select_sensor_mode` provides the same query on a managed CFE.
+The OV5647 still example uses equal minimum and maximum dimensions to require
+the full-resolution 2592×1944 mode.
+
+No fitting mode returns `-ENOENT`; a camera without a sensor returns `-ENOTSUP`.
+Malformed replies return `-EPROTO`, driver errors propagate, and the output stays
+unchanged on every failure. Enumeration is bounded to 256 advertised codes and
+4096 size ranges across accepted codes; requests accept at most 256 codes.
+Exceeding these bounds returns `-E2BIG`. Duplicate advertised codes are rejected.
+
+This implements the generic sensor policy from the archived libcamera 0.7.2
+reference. Pi's weighted dimension/aspect/bit-depth policy, frame-rate selection,
+stream-role generation and automatic assignment of modes to processing graphs
+remain pending. VIMC sensor sizes also need its scaler's output conversion; UVC
+and self-contained V4L2 nodes use capture-node formats instead of this query.
 
 ## Frame intervals
 

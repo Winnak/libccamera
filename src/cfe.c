@@ -677,6 +677,11 @@ int cc_cfe_get_sensor(cc_cfe *cfe, const cc_sensor_model **model)
     int ret = usable(cfe);
     return ret < 0 ? ret : cc_camera_get_sensor(cfe->camera, model);
 }
+int cc_cfe_select_sensor_mode(cc_cfe *cfe, const cc_sensor_mode_request *request, cc_sensor_format *format)
+{
+    int ret = usable(cfe);
+    return ret < 0 ? ret : cc_camera_select_sensor_mode(cfe->camera, request, format);
+}
 int cc_cfe_get_sensor_timing(cc_cfe *cfe, cc_sensor_timing *timing)
 {
     int ret = usable(cfe);

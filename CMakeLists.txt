@@ -14,7 +14,7 @@ option(CCAMERA_BUILD_DRM_FENCE_TEST "Build the optional real DRM sync-file test"
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 set(CCAMERA_SOURCES
-    src/io.c src/media.c src/media_topology.c src/controls.c src/stream.c src/camera.c src/vimc.c src/uvc.c src/discovery.c src/capture.c src/request_buffers.c src/fence.c src/delayed_controls.c src/sensor.c src/sensor_timing.c
+    src/io.c src/media.c src/media_topology.c src/controls.c src/stream.c src/camera.c src/sensor_mode.c src/vimc.c src/uvc.c src/discovery.c src/capture.c src/request_buffers.c src/fence.c src/delayed_controls.c src/sensor.c src/sensor_timing.c
     src/ipa.c src/ipa_statistics.c src/ipa_reference.c src/af.c src/embedded.c src/embedded_capture.c src/sensor_streams.c src/frame_interval.c
     src/vc4_tuning.c src/ipa_vc4.c src/vc4_isp.c src/cfe.c src/cfe_config.c src/pisp_format.c src/pisp_processing.c
     src/pisp_resize.c src/pisp_tiling.c src/pisp_be_config.c src/pisp_be.c)
@@ -109,6 +109,10 @@ if(CCAMERA_BUILD_TESTS)
     ccamera_compile_settings(ccamera-sensor-streams-test)
     target_include_directories(ccamera-sensor-streams-test PRIVATE include)
     add_test(NAME sensor-stream-routing COMMAND ccamera-sensor-streams-test)
+    add_executable(ccamera-sensor-mode-test tests/test_sensor_mode.c ${CCAMERA_SOURCES})
+    ccamera_compile_settings(ccamera-sensor-mode-test)
+    target_include_directories(ccamera-sensor-mode-test PRIVATE include)
+    add_test(NAME sensor-mode-selection COMMAND ccamera-sensor-mode-test)
     add_executable(ccamera-embedded-capture-test tests/test_embedded_capture.c ${CCAMERA_SOURCES})
     ccamera_compile_settings(ccamera-embedded-capture-test)
     target_include_directories(ccamera-embedded-capture-test PRIVATE include)

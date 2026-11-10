@@ -103,6 +103,9 @@ CC_API int cc_cfe_next_control(cc_cfe *cfe, uint32_t after_id, cc_control_info *
 CC_API int cc_cfe_get_controls(cc_cfe *cfe, cc_control *controls, size_t count, size_t *error_index);
 CC_API int cc_cfe_set_controls(cc_cfe *cfe, const cc_control *controls, size_t count, size_t *error_index);
 CC_API int cc_cfe_get_sensor(cc_cfe *cfe, const cc_sensor_model **model);
+/* Same read-only generic selection policy as cc_camera_select_sensor_mode. */
+CC_API int cc_cfe_select_sensor_mode(cc_cfe *cfe, const cc_sensor_mode_request *request,
+                                     cc_sensor_format *format);
 CC_API int cc_cfe_get_sensor_timing(cc_cfe *cfe, cc_sensor_timing *timing);
 CC_API int cc_cfe_get_frame_interval(cc_cfe *cfe,cc_fraction *interval);
 CC_API int cc_cfe_set_frame_interval(cc_cfe *cfe,cc_fraction *interval);

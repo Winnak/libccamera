@@ -316,33 +316,15 @@ int main(int argc, char **argv)
         ret = -ENOTSUP;
         goto done;
     }
-    for (uint32_t c = 0;; ++c) {
-        cc_sensor_mode mode;
-        ret = cc_camera_enum_sensor_mode(camera, c, 0, &mode);
-        if (ret == -ENOENT) {
-            ret = 0;
-            break;
-        }
-        if (ret < 0)
-            goto done;
-        if (!bayer(mode.mbus_code))
-            continue;
-        for (uint32_t s = 0;; ++s) {
-            ret = cc_camera_enum_sensor_mode(camera, c, s, &mode);
-            if (ret == -ENOENT) {
-                ret = 0;
-                break;
-            }
-            if (ret < 0)
-                goto done;
-            if (mode.sizes.max_width == 2592 && mode.sizes.max_height == 1944)
-                raw = (cc_format){.fourcc = bayer(mode.mbus_code), .width = 2592, .height = 1944};
-        }
-    }
-    if (!raw.width) {
-        ret = -ENOTSUP;
+    const uint32_t codes[] = {MEDIA_BUS_FMT_SBGGR10_1X10, MEDIA_BUS_FMT_SGBRG10_1X10,
+                              MEDIA_BUS_FMT_SGRBG10_1X10, MEDIA_BUS_FMT_SRGGB10_1X10};
+    cc_sensor_mode_request mode_request = {.mbus_codes = codes, .num_mbus_codes = 4,
+        .width = 2592, .height = 1944, .max_width = 2592, .max_height = 1944};
+    cc_sensor_format selected;
+    ret = cc_camera_select_sensor_mode(camera, &mode_request, &selected);
+    if (ret < 0)
         goto done;
-    }
+    raw = (cc_format){.fourcc = bayer(selected.mbus_code), .width = selected.width, .height = selected.height};
     ret = cc_camera_configure(camera, &raw);
     if (ret < 0)
         goto done;

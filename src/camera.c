@@ -328,40 +328,6 @@ int cc_camera_enum_size(cc_camera *camera, uint32_t fourcc, uint32_t index, cc_s
     return 0;
 }
 
-int cc_camera_enum_sensor_mode(cc_camera *camera, uint32_t code_index,
-                               uint32_t size_index, cc_sensor_mode *mode)
-{
-    if (!camera || !mode)
-        return -EINVAL;
-    if (camera->sensor_fd < 0)
-        return -ENOTSUP;
-    cc_sensor_streams streams;
-    int ret=cc_camera_get_sensor_streams(camera,&streams);
-    if (ret<0) return ret;
-    struct cc_subdev_mbus_code_enum code = {
-        .pad = streams.image.pad, .stream=streams.image.stream, .index = code_index, .which = V4L2_SUBDEV_FORMAT_ACTIVE
-    };
-    ret = cc_ioctl(&camera->io, camera->sensor_fd, VIDIOC_SUBDEV_ENUM_MBUS_CODE, &code);
-    if (ret < 0)
-        return ret == -EINVAL ? -ENOENT : ret;
-    if (code.pad != streams.image.pad || code.stream != streams.image.stream ||
-        code.which != V4L2_SUBDEV_FORMAT_ACTIVE || code.index != code_index || !code.code) return -EPROTO;
-    struct cc_subdev_frame_size_enum size = {
-        .pad = streams.image.pad, .index = size_index, .code = code.code,
-        .which = V4L2_SUBDEV_FORMAT_ACTIVE, .stream=streams.image.stream
-    };
-    ret = cc_ioctl(&camera->io, camera->sensor_fd, VIDIOC_SUBDEV_ENUM_FRAME_SIZE, &size);
-    if (ret < 0)
-        return ret == -EINVAL ? -ENOENT : ret;
-    if (size.pad != streams.image.pad || size.stream != streams.image.stream || size.index != size_index ||
-        size.which != V4L2_SUBDEV_FORMAT_ACTIVE || size.code != code.code || !size.min_width || !size.min_height ||
-        size.max_width < size.min_width || size.max_height < size.min_height) return -EPROTO;
-    mode->mbus_code = code.code;
-    mode->sizes = (cc_size_range) { size.min_width, size.max_width, 1,
-                                    size.min_height, size.max_height, 1 };
-    return 0;
-}
-
 /* CSI-2 bus codes describe samples; the capture fourcc separately specifies
  * packed/unpacked memory. Preserve this distinction when configuring Unicam. */
 uint32_t cc_bayer_mbus(uint32_t fourcc)

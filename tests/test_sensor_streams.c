@@ -12,6 +12,11 @@ static void test_discovery_and_routing(void)
         CHECK(streams.embedded.mbus_code==0x8002 && streams.embedded.width==800 && streams.embedded.height==4);
         cc_sensor_mode mode; OK(cc_camera_enum_sensor_mode(&f.camera,0,0,&mode));
         CHECK(f.size_stream==7 && mode.sizes.max_width==640);
+        const uint32_t codes[]={MEDIA_BUS_FMT_SRGGB12_1X12,MEDIA_BUS_FMT_SRGGB10_1X10};
+        cc_sensor_mode_request request={.mbus_codes=codes,.num_mbus_codes=2,.width=640,.height=480};
+        cc_sensor_format selected; OK(cc_camera_select_sensor_mode(&f.camera,&request,&selected));
+        CHECK(selected.mbus_code==codes[0] && selected.width==640 && selected.height==480);
+        CHECK(f.size_stream==7 && !f.sensor_sets && !f.receiver_sets && !f.current_sets && !f.old_sets);
         /* TRY and ACTIVE may have different route IDs; TRY cannot change the
          * selected active stream cached by the configured camera. */
         f.image[0]=19; f.routes[0][0].source_stream=19;

@@ -16,6 +16,11 @@
 
 int main(void)
 {
+    const uint32_t mode_code=0x300f;
+    cc_sensor_mode_request mode_request={.mbus_codes=&mode_code,.num_mbus_codes=1,.width=640,.height=480};
+    cc_sensor_format sensor_format;
+    if (cc_camera_select_sensor_mode(NULL,&mode_request,&sensor_format)!=-EINVAL ||
+        cc_cfe_select_sensor_mode(NULL,&mode_request,&sensor_format)!=-EINVAL) return 1;
     cc_fraction interval={1,30}; cc_frame_interval_range intervals;
     if (cc_stream_get_frame_interval(NULL,&interval)!=-EINVAL || cc_stream_set_frame_interval(NULL,&interval)!=-EINVAL ||
         cc_stream_enum_frame_interval(NULL,1,1,1,0,&intervals)!=-EINVAL ||
