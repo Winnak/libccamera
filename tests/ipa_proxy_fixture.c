@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #define _GNU_SOURCE
 #include "ipa_proxy_fixture.h"
+#include "namespace.h"
 #include <ccamera/ipa_module.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -84,9 +85,11 @@ CC_API int cc_ipa_module_create_v1(uint32_t abi, size_t ops_size, const void *da
     trace('C');
     if (abi != CC_IPA_ABI_VERSION || ops_size != sizeof(*ops) || size != sizeof(struct proxy_fixture_init)) return -EINVAL;
     struct proxy_fixture_init init; memcpy(&init, data, sizeof(init));
-    struct stat user, net;
-    if (init.parent_pid == getpid() || stat("/proc/self/ns/user", &user) || stat("/proc/self/ns/net", &net) ||
-        init.user_namespace == user.st_ino || init.net_namespace == net.st_ino) return -EPROTO;
+    uint64_t user = 0, net = 0;
+    int ret = test_namespace_inode("/proc/self/ns/user", &user);
+    if (!ret) ret = test_namespace_inode("/proc/self/ns/net", &net);
+    if (ret < 0) { fprintf(stderr, "Proxy fixture namespace identity: %s\n", strerror(-ret)); return ret; }
+    if (init.parent_pid == getpid() || init.user_namespace == user || init.net_namespace == net) return -EPROTO;
     if (init.mode == 1) return -ERANGE;
     if (init.mode == 11) _exit(24);
     if (init.mode == 14) for (;;) pause();

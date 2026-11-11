@@ -199,7 +199,10 @@ and queued-kernel-reference cleanup. Pure header/ancillary fuzzing does no OS I/
 Process tests cover exec failures and deadlines, exact fd inheritance, pidfd
 signals/waits/reaping, parent death, spawning during background allocation, and
 both close-range and proc-fd cleanup. Namespace tests verify different user/net
-namespace inodes; unsupported kernel/policy configurations report a skip.
+namespace inodes using the `/proc/self/ns/*` symlink targets, so AppArmor need
+not allow following those links into nsfs. Unsupported kernel/policy
+configurations report a skip locally; CI rejects skipped tests to ensure that
+namespace isolation and the rest of the configured suite are actually exercised.
 Worker/proxy tests exercise module and built-in factories, namespace separation,
 deep callback data, descriptor-bearing controls, failures/timeouts, parent exit,
 independent instances and reaping. Existing VC4/CFE/PiSP/VIMC graph suites also

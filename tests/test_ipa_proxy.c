@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #define _GNU_SOURCE
 #include "ipa_proxy_fixture.h"
+#include "namespace.h"
 #include <ccamera/ipa_proxy.h>
 #include <ccamera/capture.h>
 #include <dirent.h>
@@ -28,8 +29,10 @@ static size_t descriptors(void)
 }
 static struct proxy_fixture_init init(uint32_t mode)
 {
-    struct stat user, net; OK(stat("/proc/self/ns/user", &user)); OK(stat("/proc/self/ns/net", &net));
-    return (struct proxy_fixture_init){mode, getpid(), user.st_ino, net.st_ino};
+    struct proxy_fixture_init data = {.mode = mode, .parent_pid = getpid()};
+    OK(test_namespace_inode("/proc/self/ns/user", &data.user_namespace));
+    OK(test_namespace_inode("/proc/self/ns/net", &data.net_namespace));
+    return data;
 }
 static int create(uint32_t mode, cc_ipa **ipa)
 {

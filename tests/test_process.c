@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "process.h"
 #include "process_report.h"
+#include "namespace.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -35,7 +36,7 @@ static uint64_t hash(const char *value)
 }
 static uint64_t namespace_inode(const char *name)
 {
-    struct stat status; CHECK(!stat(name, &status)); return status.st_ino;
+    uint64_t inode = 0; OK(test_namespace_inode(name, &inode)); return inode;
 }
 static int available(uint32_t flags)
 {
@@ -68,6 +69,9 @@ static void report_case(bool fallback, uint32_t flags, bool high_secret)
     CHECK(fcntl(pipes[1], F_GETFD) & FD_CLOEXEC); CHECK(fcntl(secret, F_GETFD) >= 0);
     OK(cc_process_wait_exec(process, 2000)); ERROR(cc_process_exec_fd(process), ENODATA);
     OK(close(pipes[1])); cc_process_result result; OK(cc_process_wait(process, &result, 2000));
+    if (result.status != CC_PROCESS_EXITED || result.exit_code != 23)
+        fprintf(stderr, "Process helper: status=%d exit=%d signal=%d exec_error=%d\n",
+            result.status, result.exit_code, result.signal, result.exec_error);
     CHECK(result.status == CC_PROCESS_EXITED && result.exit_code == 23 && !result.signal && result.exec_complete && !result.exec_error);
     struct process_report report; CHECK(read(pipes[0], &report, sizeof(report)) == sizeof(report));
     CHECK(report.pid == cc_process_pid(process) && report.parent_pid == getpid());

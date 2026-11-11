@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: CC0-1.0 */
 #define _GNU_SOURCE
 #include "process_report.h"
+#include "namespace.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -28,10 +29,8 @@ static int report(int fd, int secret, const char *argument)
         .passed_flags = fcntl(fd, F_GETFD), .secret_open = secret >= 0 && fcntl(secret, F_GETFD) >= 0,
         .argument_hash = hash(argument), .environment_hash = hash(getenv("CCAMERA_PROCESS_TEST_ENV"))};
     struct stat status, null;
-    if (stat("/proc/self/ns/user", &status)) return 100;
-    result.user_namespace = status.st_ino;
-    if (stat("/proc/self/ns/net", &status)) return 101;
-    result.net_namespace = status.st_ino;
+    if (test_namespace_inode("/proc/self/ns/user", &result.user_namespace)) return 100;
+    if (test_namespace_inode("/proc/self/ns/net", &result.net_namespace)) return 101;
     if (fstat(STDERR_FILENO, &status)) return 102;
     result.stderr_device = status.st_dev; result.stderr_inode = status.st_ino;
     if (stat("/dev/null", &null)) return 103;
