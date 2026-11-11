@@ -23,6 +23,7 @@
 #include "media_v2_driver.h"
 
 static const char *proxy_worker;
+static bool auto_creation;
 static int create_reference(const cc_ipa_reference_tuning *tuning, cc_ipa **ipa)
 {
     if (!proxy_worker) return cc_ipa_reference_create(tuning, ipa);
@@ -2997,14 +2998,20 @@ static void create_loaded_ipa(const char *path, bool managed, uint32_t mode, cc_
         cc_ipa_module_directory d = {directory, 0};
         cc_ipa_manager_options options = {.directories = &d, .num_directories = 1};
         cc_ipa_manager *manager = NULL; OK(cc_ipa_manager_open(&options, &manager)); free(directory);
-        if (proxy_worker) {
+        if (auto_creation) {
+            cc_ipa_auto_options auto_options = {.proxy = {.worker_path = proxy_worker}};
+            OK(cc_ipa_manager_create_auto(manager, "TestPipeline", 4, 4, "alternate", &mode, sizeof(mode), &auto_options, ipa, NULL));
+        } else if (proxy_worker) {
             cc_ipa_proxy_options proxy_options = {.worker_path = proxy_worker};
             OK(cc_ipa_manager_create_proxy(manager, "TestPipeline", 4, 4, "alternate", &mode, sizeof(mode), &proxy_options, ipa));
         } else OK(cc_ipa_manager_create(manager, "TestPipeline", 4, 4, "alternate", &mode, sizeof(mode), ipa));
         cc_ipa_manager_close(manager);
     } else {
         cc_ipa_module *module = NULL; OK(cc_ipa_module_open(path, &module));
-        if (proxy_worker) {
+        if (auto_creation) {
+            cc_ipa_auto_options auto_options = {.proxy = {.worker_path = proxy_worker}};
+            OK(cc_ipa_module_create_auto(module, &mode, sizeof(mode), &auto_options, ipa, NULL));
+        } else if (proxy_worker) {
             cc_ipa_proxy_options proxy_options = {.worker_path = proxy_worker};
             OK(cc_ipa_module_create_proxy(module, &mode, sizeof(mode), &proxy_options, ipa));
         } else OK(cc_ipa_module_create(module, &mode, sizeof(mode), ipa));
@@ -3493,12 +3500,18 @@ int main(int argc, char **argv)
         test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_af_graph(false); test_af_graph(true); test_embedded_af_graph();
         puts("Isolated VC4/CFE/PiSP feedback, AF/PDAF, timing, imported results and restarts passed"); return 0;
     }
+    if (argc == 4 && (!strcmp(argv[1], "auto-modules") || !strcmp(argv[1], "auto-manager"))) {
+        auto_creation = true; proxy_worker = argv[3];
+#ifndef CCAMERA_WITH_IPA_CRYPTO
+        int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
+#endif
+    }
     if (argc == 4 && (!strcmp(argv[1], "proxy-modules") || !strcmp(argv[1], "proxy-manager"))) {
         proxy_worker = argv[3]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
     }
     if ((argc == 3 && (!strcmp(argv[1], "modules") || !strcmp(argv[1], "manager"))) ||
         (argc == 4 && proxy_worker)) {
-        bool managed = !strcmp(argv[1], "manager") || !strcmp(argv[1], "proxy-manager");
+        bool managed = !strcmp(argv[1], "manager") || !strcmp(argv[1], "proxy-manager") || !strcmp(argv[1], "auto-manager");
         test_loaded_ipa(argv[2], false, managed); test_loaded_ipa(argv[2], true, managed);
         use_v2_topology = true; test_loaded_ipa(argv[2], false, managed); test_loaded_ipa(argv[2], true, managed);
         puts("Loaded IPA adoption, VC4/CFE/PiSP completion, restart and cancellation passed"); return 0;

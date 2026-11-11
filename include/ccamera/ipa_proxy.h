@@ -10,6 +10,29 @@ typedef struct cc_ipa_proxy_options {
     const char *worker_path; /* NULL searches environment/build/install trees. */
     int timeout_ms; /* 0 selects 2000 ms; -1 waits indefinitely. */
 } cc_ipa_proxy_options;
+enum cc_ipa_auto_flags {
+    CC_IPA_AUTO_FORCE_ISOLATION = 1U
+};
+typedef enum cc_ipa_execution_mode {
+    CC_IPA_EXECUTION_IN_PROCESS,
+    CC_IPA_EXECUTION_ISOLATED
+} cc_ipa_execution_mode;
+typedef struct cc_ipa_auto_options {
+    uint32_t flags;
+    cc_ipa_proxy_options proxy;
+} cc_ipa_auto_options;
+/* Select in-process execution only for a VALID signature. Missing, invalid or
+ * unavailable verification uses the isolated worker; FORCE_ISOLATION always
+ * uses it. Operational, factory and worker errors propagate without fallback.
+ * Factory data must be relocatable, as for create_proxy. NULL options selects
+ * defaults. *ipa=NULL on error; optional mode stays unchanged on error. */
+CC_API int cc_ipa_module_create_auto(cc_ipa_module *module, const void *data, size_t size,
+    const cc_ipa_auto_options *options, cc_ipa **ipa, cc_ipa_execution_mode *mode);
+/* Preserves first-match discovery, even when the selected module fails. */
+CC_API int cc_ipa_manager_create_auto(cc_ipa_manager *manager, const char *pipeline_name,
+    uint32_t minimum_version, uint32_t maximum_version, const char *name,
+    const void *data, size_t size, const cc_ipa_auto_options *options, cc_ipa **ipa,
+    cc_ipa_execution_mode *mode);
 /* Create a C IPA in an exec worker with new user and network namespaces.
  * Namespace/kernel/policy errors are returned without reducing isolation.
  * The returned ordinary IPA works with cc_capture_set_ipa. Each instance owns

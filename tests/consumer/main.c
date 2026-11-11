@@ -56,6 +56,14 @@ int main(int argc, char **argv)
         cc_ipc_packet_data(NULL, NULL) || cc_ipc_packet_fds(NULL, NULL)) return 1;
     cc_ipc_packet_destroy(NULL); cc_ipc_close(NULL);
     cc_ipa_manager *manager = NULL; cc_ipa *selected = NULL; size_t module_index = 0;
+    cc_ipa_signature_status signature_status = CC_IPA_SIGNATURE_VALID;
+    cc_ipa_execution_mode execution_mode = CC_IPA_EXECUTION_IN_PROCESS;
+    if (cc_ipa_module_verify_signature(NULL, &signature_status) != -EINVAL ||
+        cc_ipa_manager_verify_signature(NULL, 0, &signature_status) != -EINVAL ||
+        signature_status != CC_IPA_SIGNATURE_VALID ||
+        cc_ipa_module_create_auto(NULL, NULL, 0, NULL, &selected, &execution_mode) != -EINVAL || selected ||
+        cc_ipa_manager_create_auto(NULL, "rpi/vc4", 1, 1, NULL, NULL, 0, NULL, &selected, &execution_mode) != -EINVAL || selected ||
+        execution_mode != CC_IPA_EXECUTION_IN_PROCESS) return 1;
     uint32_t vimc_flags = 123; cc_ipa_vimc_event vimc_event;
     if (cc_ipa_vimc_create_proxy(NULL, NULL, &selected, &vimc_flags) != -EINVAL || selected || vimc_flags != 123 ||
         cc_ipa_vimc_map_buffers(NULL, NULL, 0) != -EINVAL || cc_ipa_vimc_unmap_buffers(NULL, NULL, 0) != -EINVAL ||

@@ -50,6 +50,8 @@ CC_API const cc_ipa_module_info *cc_ipa_manager_get_info(const cc_ipa_manager *m
 CC_API const char *cc_ipa_manager_get_path(const cc_ipa_manager *manager, size_t index);
 CC_API int cc_ipa_manager_get_signature(const cc_ipa_manager *manager, size_t index,
     const void **data, size_t *size);
+CC_API int cc_ipa_manager_verify_signature(const cc_ipa_manager *manager, size_t index,
+    cc_ipa_signature_status *status);
 /* Select the FIRST matching module, not the highest version. name is optional
  * and matches the metadata name exactly. Versions are inclusive. Returns 0 or
  * a negative errno, -ENOENT if none matches; index stays unchanged on failure. */

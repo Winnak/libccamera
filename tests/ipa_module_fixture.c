@@ -4,10 +4,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void trace(char event)
 {
     const char *path = getenv("CCAMERA_TEST_MODULE_TRACE");
+    const char *pid_path = getenv("CCAMERA_TEST_MODULE_PID_TRACE");
+    if (pid_path) {
+        FILE *pid_file = fopen(pid_path, "a");
+        if (pid_file) { (void)fprintf(pid_file, "%ld %c\n", (long)getpid(), event); (void)fclose(pid_file); }
+    }
     if (!path) return;
     FILE *file = fopen(path, "a");
     if (file) { (void)fputc(event, file); (void)fclose(file); }

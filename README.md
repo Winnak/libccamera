@@ -2,7 +2,7 @@
 
 A C17 rewrite of [libcamera](https://github.com/raspberrypi/libcamera/)'s 
 core for Linux, built with CMake, mostly written by AI. Static linking
-is the default, and libc is the only required runtime dependency. The library
+is the default, and libc is the only required runtime dependency by default. The library
 uses Linux media/V4L2 APIs without depending on the upstream C++ library,
 libudev, Python, graphics libraries, codecs, or an event-loop library.
 
@@ -33,7 +33,9 @@ remain pending.
 
 Native [IPC transport](docs/IPC.md) provides reference-compatible datagram and
 descriptor framing, namespace-isolated workers and C IPA callback proxies for
-current VC4/CFE/PiSP graphs and the existing VIMC mock IPA.
+current VC4/CFE/PiSP graphs and the existing VIMC mock IPA. Optional
+[libcrypto-backed signing](docs/BUILDING.md#optional-ipa-signing) verifies native C
+modules and selects in-process or isolated execution automatically.
 
 ## Build and test
 

@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: CC0-1.0
+# Inputs: MODULE, PRIVATE_KEY, OPENSSL; FORCE_SIGN for final installed bytes.
+foreach(required MODULE PRIVATE_KEY OPENSSL)
+    if(NOT DEFINED ${required} OR NOT EXISTS "${${required}}")
+        message(FATAL_ERROR "IPA signing: missing ${required}")
+    endif()
+endforeach()
+file(SHA256 "${MODULE}" module_hash)
+file(SHA256 "${PRIVATE_KEY}" key_hash)
+set(stamp "${MODULE}.sign.inputs")
+set(expected "${module_hash}\n${key_hash}\n")
+if(NOT FORCE_SIGN AND EXISTS "${MODULE}.sign" AND EXISTS "${stamp}")
+    file(READ "${stamp}" previous)
+    file(SHA256 "${MODULE}.sign" signature_hash)
+    if(previous STREQUAL "${expected}${signature_hash}\n")
+        return()
+    endif()
+endif()
+# -passin prevents password prompts. rsa_padding_mode rejects other key types.
+string(RANDOM LENGTH 16 ALPHABET 0123456789abcdef nonce)
+set(temporary "${MODULE}.sign.${nonce}.tmp")
+execute_process(COMMAND "${OPENSSL}" dgst -sha256 -sign "${PRIVATE_KEY}"
+    -keyform PEM -passin pass: -sigopt rsa_padding_mode:pkcs1 -out "${temporary}" "${MODULE}"
+    RESULT_VARIABLE result ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    file(REMOVE "${temporary}")
+    message(FATAL_ERROR "IPA signing failed: ${error}")
+endif()
+file(RENAME "${temporary}" "${MODULE}.sign")
+if(NOT FORCE_SIGN)
+    file(SHA256 "${MODULE}.sign" signature_hash)
+    file(WRITE "${stamp}" "${expected}${signature_hash}\n")
+else()
+    # Include the sidecar in CMake's install manifest as well.
+    list(APPEND CMAKE_INSTALL_MANIFEST_FILES "${MODULE}.sign")
+endif()

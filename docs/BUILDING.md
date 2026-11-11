@@ -234,3 +234,93 @@ target_link_libraries(your_library PRIVATE ccamera::ccamera)
 
 Pass `-DCMAKE_PREFIX_PATH=/your/prefix` when configuring the consumer. A
 `ccamera.pc` file is also installed; pkg-config is not required to build libccamera.
+
+
+## Optional IPA signing
+
+`CCAMERA_WITH_IPA_CRYPTO` defaults to `OFF`. Enabled builds require CMake 3.18+,
+OpenSSL 3+ development files for the target's `Crypto` component, and a **host**
+`openssl` executable. They link `OpenSSL::Crypto`, never libssl. Public C headers
+contain no OpenSSL types or includes. On Debian/Ubuntu add `libssl-dev openssl`.
+For cross builds, configure target headers/libraries through the toolchain and
+`OPENSSL_ROOT_DIR` as usual. `CCAMERA_HOST_OPENSSL` can select an absolute host
+executable; its discovery bypasses CMake's target root. Signing never executes a
+target verifier or target OpenSSL executable. When using cross pkg-config,
+set `PKG_CONFIG_LIBDIR`/`PKG_CONFIG_SYSROOT_DIR` for the target metadata as usual;
+this prevents host compression dependencies from entering target static links.
+Compatibility helpers support OpenSSL 3 version checks and static dependencies
+with CMake 3.18 as well as current CMake releases.
+
+```sh
+cmake -S . -B build-crypto -DCCAMERA_WITH_IPA_CRYPTO=ON \
+    -DCCAMERA_IPA_PRIVATE_KEY=/secure/persistent-ipa-key.pem
+cmake --build build-crypto
+ctest --test-dir build-crypto --output-on-failure
+```
+
+`CCAMERA_IPA_PRIVATE_KEY` and `CCAMERA_IPA_PUBLIC_KEY` are mutually exclusive PEM
+file options, rejected when crypto is disabled. Keys must be plain RSA keys;
+EC, RSA-PSS and password-encrypted keys are rejected without prompting. With a
+private key the build embeds only its public DER SubjectPublicKeyInfo. With
+neither option the build generates an RSA-2048 development key in
+`build-crypto/ipa-keys/development.pem`, mode 0600 in an owner-only directory.
+It persists across builds and reconfiguration. Replacing the key updates the
+embedded root on the next build. No private key is installed or exported.
+
+Use a persistent, securely managed private key for distributed releases: fresh
+build directories otherwise have distinct development roots. A verification-only
+packaging build can use a public key without generating a production private key:
+
+```sh
+openssl pkey -in /secure/persistent-ipa-key.pem -pubout -out ipa-public.pem
+cmake -S . -B build-public -DCCAMERA_WITH_IPA_CRYPTO=ON \
+    -DCCAMERA_IPA_PUBLIC_KEY="$PWD/ipa-public.pem"
+```
+
+Crypto tests use an independent development trust root, so public-key-only builds
+do not require the production private key. Runtime trust is exclusively the
+embedded public key; supplying a different key beside a module has no effect.
+
+For a module target in this library build, use the configured signing key:
+
+```cmake
+add_library(my_ipa MODULE my_ipa.c)
+target_link_libraries(my_ipa PRIVATE ccamera::ccamera)
+ccamera_sign_ipa(TARGET my_ipa INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/ccamera/ipa"
+                COMPONENT ipa)
+```
+
+Installed consumers obtain the same helper from `find_package(ccamera CONFIG
+REQUIRED)` and **must** provide `PRIVATE_KEY /secure/key.pem`. Public-key-only
+builds also require an explicit private key when using the helper. The helper
+supports `TARGET`, `PRIVATE_KEY`, `INSTALL_DESTINATION` and `COMPONENT` arguments.
+It creates an ALL target named `<target>-ipa-sign`; building that target signs the
+module, and a normal build includes it. It regenerates the binary `.so.sign`
+sidecar after a module/key change even if the module did not relink. The helper
+writes signatures atomically and fails on signing errors.
+
+With `INSTALL_DESTINATION`, the helper installs the module and signs its final
+installed bytes **after** stripping and RPATH changes. Do not also install that
+module elsewhere through a later modifying rule. The helper supports `DESTDIR`,
+`cmake --install --prefix`, components, absolute destinations and multiple
+configurations. Private paths occur only in local build/install instructions,
+never in the installed package exports. Any later packaging edits to module bytes
+(including strip, debug splitting or RPATH rewriting) require re-signing:
+
+```sh
+openssl dgst -sha256 -sign /secure/persistent-ipa-key.pem -keyform PEM -passin pass: \
+    -sigopt rsa_padding_mode:pkcs1 -out module.so.sign module.so
+ccamera-ipa-verify module.so
+```
+
+`ccamera-ipa-verify` is installed only with crypto support and never loads code.
+It exits 0 for valid, 1 for missing/invalid signatures, and 2 for unavailable
+verification, usage errors or operational failures. Signing follows the
+[OpenSSL dgst workflow](https://docs.openssl.org/4.0/man1/openssl-dgst/); runtime
+verification uses the high-level
+[EVP API](https://docs.openssl.org/4.0/man3/EVP_DigestVerifyInit/).
+
+Static CMake exports find `OpenSSL::Crypto` and carry its link dependencies.
+`ccamera.pc` declares `Requires.private: libcrypto >= 3`, so use
+`pkg-config --static --libs ccamera` for static linking, including libcrypto's
+transitive private dependencies. Shared consumers need no OpenSSL public headers.

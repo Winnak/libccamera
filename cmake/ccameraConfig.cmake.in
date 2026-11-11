@@ -1,3 +1,10 @@
 @PACKAGE_INIT@
+if(@CCAMERA_WITH_IPA_CRYPTO@ AND NOT @BUILD_SHARED_LIBS@)
+    include(CMakeFindDependencyMacro)
+    find_dependency(OpenSSL COMPONENTS Crypto)
+    include("${CMAKE_CURRENT_LIST_DIR}/ccameraOpenSSL.cmake")
+    ccamera_ipa_openssl_requirements()
+endif()
 include("${CMAKE_CURRENT_LIST_DIR}/ccameraTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ccameraIpaSigning.cmake")
 check_required_components(ccamera)

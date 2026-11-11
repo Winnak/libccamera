@@ -10,6 +10,12 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#ifdef CCAMERA_WITH_IPA_CRYPTO
+#include <openssl/evp.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
+#include "cc_ipa_public_key.h"
+#endif
 
 struct cc_ipa_module {
     char *path;
@@ -18,7 +24,7 @@ struct cc_ipa_module {
     cc_ipa_module_info info;
     void *signature;
     size_t signature_size, references;
-    bool factory;
+    bool factory, signature_present;
     void *handle;
     cc_ipa_module_factory create;
 };
@@ -66,6 +72,7 @@ static int read_signature(cc_ipa_module *m)
     if (fd < 0) return 0; /* Signatures are optional, as in the reference. */
     int ret = read_file(fd, 1024U * 1024U, &m->signature, &m->signature_size, NULL);
     close(fd);
+    if (!ret) m->signature_present = true;
     return ret == -ENOMEM || ret == -EFBIG ? ret : 0;
 }
 void cc_ipa_module_close(cc_ipa_module *m)
@@ -118,12 +125,65 @@ int cc_ipa_module_get_signature(const cc_ipa_module *m, const void **data, size_
     *size = m->signature_size;
     return 0;
 }
-static int unchanged(cc_ipa_module *m)
+static int unchanged(const cc_ipa_module *m)
 {
     struct stat file, path;
     if (fstat(m->fd, &file)) return -errno;
-    if (stat(m->path, &path)) return errno == ENOENT ? -ESTALE : -errno;
-    return same_file(&m->snapshot, &file) && same_file(&m->snapshot, &path) ? 0 : -ESTALE;
+    if (!same_file(&m->snapshot, &file)) return -ESTALE;
+    if (stat(m->path, &path))
+        return errno == ENOENT || errno == ENOTDIR || errno == ELOOP ? -ESTALE : -errno;
+    return same_file(&m->snapshot, &path) ? 0 : -ESTALE;
+}
+int cc_ipa_module_verify_signature(const cc_ipa_module *m, cc_ipa_signature_status *status)
+{
+    if (!m || !status) return -EINVAL;
+    int ret = unchanged(m);
+    if (ret < 0) return ret;
+    cc_ipa_signature_status result = CC_IPA_SIGNATURE_UNAVAILABLE;
+#ifdef CCAMERA_WITH_IPA_CRYPTO
+    if (!m->signature_present) result = CC_IPA_SIGNATURE_MISSING;
+    else {
+        const unsigned char *der = cc_ipa_public_key;
+        EVP_PKEY *key = d2i_PUBKEY(NULL, &der, (long)sizeof(cc_ipa_public_key));
+        if (!key) return -EIO;
+        EVP_MD_CTX *context = EVP_MD_CTX_new();
+        if (!context) { EVP_PKEY_free(key); return -ENOMEM; }
+        EVP_PKEY_CTX *key_context = NULL;
+        if (!EVP_PKEY_is_a(key, "RSA") ||
+            EVP_DigestVerifyInit(context, &key_context, EVP_sha256(), NULL, key) != 1 ||
+            EVP_PKEY_CTX_set_rsa_padding(key_context, RSA_PKCS1_PADDING) <= 0) ret = -EIO;
+        unsigned char bytes[16384];
+        off_t offset = 0;
+        while (!ret && offset < m->snapshot.st_size) {
+            off_t remaining = m->snapshot.st_size - offset;
+            size_t length = remaining < (off_t)sizeof(bytes) ? (size_t)remaining : sizeof(bytes);
+            ssize_t count = pread(m->fd, bytes, length, offset);
+            if (count < 0) { if (errno == EINTR) continue; ret = -errno; break; }
+            if (!count) { ret = -ESTALE; break; }
+            if (EVP_DigestVerifyUpdate(context, bytes, (size_t)count) != 1) ret = -EIO;
+            offset += count;
+        }
+        if (!ret) {
+            /* Reject malformed lengths before Final: providers may report
+             * decoding errors as negative values for malformed RSA signatures. */
+            int expected = EVP_PKEY_get_size(key);
+            if (expected <= 0) ret = -EIO;
+            else if (m->signature_size != (size_t)expected) result = CC_IPA_SIGNATURE_INVALID;
+            else {
+                int verified = EVP_DigestVerifyFinal(context, m->signature, m->signature_size);
+                if (verified < 0) ret = -EIO;
+                else result = verified == 1 ? CC_IPA_SIGNATURE_VALID : CC_IPA_SIGNATURE_INVALID;
+            }
+        }
+        EVP_MD_CTX_free(context); EVP_PKEY_free(key);
+    }
+#endif
+    /* Staleness takes precedence over a digest/signature failure. */
+    int identity = unchanged(m);
+    if (identity < 0) return identity;
+    if (ret < 0) return ret;
+    *status = result;
+    return 0;
 }
 static struct cc_ipa_module_transfer transfer_stamp(const struct stat *status, const cc_ipa_module_info *info)
 {

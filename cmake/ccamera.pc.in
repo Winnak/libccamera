@@ -8,4 +8,5 @@ Description: C17 camera capture and Linux media pipeline library
 Version: @PROJECT_VERSION@
 Libs: -L${libdir} -lccamera
 Libs.private: @CCAMERA_PC_PRIVATE_LIBS@
+Requires.private: @CCAMERA_PC_PRIVATE_REQUIRES@
 Cflags: -I${includedir}

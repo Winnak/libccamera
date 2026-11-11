@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: ${{ matrix.compiler }} / ${{ matrix.linkage }} / ${{ matrix.build_type }}
+    name: ${{ matrix.compiler }} / ${{ matrix.linkage }} / crypto=${{ matrix.crypto }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
@@ -28,6 +28,7 @@ jobs:
       matrix:
         compiler: [gcc, clang]
         linkage: [static, shared]
+        crypto: ['OFF', 'ON']
         include:
           - linkage: static
             shared: 'OFF'
@@ -43,12 +44,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y cmake ninja-build gcc clang libc6-dev linux-libc-dev python3 pkg-config
+          if [ "${{ matrix.crypto }}" = ON ]; then sudo apt-get install --no-install-recommends -y libssl-dev openssl; fi
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_C_COMPILER=${{ matrix.compiler }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+          -DCCAMERA_WITH_IPA_CRYPTO=${{ matrix.crypto }}
           -DCMAKE_C_FLAGS=-Werror
       - name: Build library, examples and tests
         run: cmake --build build
@@ -65,9 +68,14 @@ jobs:
           ./build/pkgconfig-consumer
 
   sanitizers:
-    name: Clang / ASan + UBSan + fuzz smoke tests
+    name: ASan + UBSan / shared=${{ matrix.shared }} / crypto=${{ matrix.crypto }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shared: ['OFF', 'ON']
+        crypto: ['OFF', 'ON']
     env:
       ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
       UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
@@ -79,10 +87,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y cmake ninja-build clang libclang-rt-dev linux-libc-dev python3
+          if [ "${{ matrix.crypto }}" = ON ]; then sudo apt-get install --no-install-recommends -y libssl-dev openssl; fi
       - name: Configure
         run: >-
           cmake -S . -B build-sanitizers -G Ninja
           -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug
+          -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+          -DCCAMERA_WITH_IPA_CRYPTO=${{ matrix.crypto }}
           -DCMAKE_C_FLAGS="-Werror -fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCCAMERA_BUILD_FUZZERS=ON
       - name: Build instrumented library, examples, tests and fuzzers

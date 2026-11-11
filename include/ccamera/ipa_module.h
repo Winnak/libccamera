@@ -54,11 +54,25 @@ CC_API int cc_ipa_module_match(const cc_ipa_module *module, const char *pipeline
     uint32_t minimum_version, uint32_t maximum_version);
 /* Borrowed optional signature bytes. Outputs stay unchanged on error. */
 CC_API int cc_ipa_module_get_signature(const cc_ipa_module *module, const void **data, size_t *size);
+typedef enum cc_ipa_signature_status {
+    CC_IPA_SIGNATURE_VALID,
+    CC_IPA_SIGNATURE_MISSING,
+    CC_IPA_SIGNATURE_INVALID,
+    CC_IPA_SIGNATURE_UNAVAILABLE
+} cc_ipa_signature_status;
+/* Verify the complete retained file and captured signature without loading code.
+ * Uses only the build's embedded RSA public key (SHA-256, PKCS#1 v1.5).
+ * Returns 0 with a status, or a negative operational errno; status stays
+ * unchanged on error. Changed/replaced files return -ESTALE. Crypto-disabled
+ * builds report UNAVAILABLE. A readable empty signature is INVALID.
+ * Modules and dependencies must remain trusted and unchanged through loading;
+ * this is not an immutable file snapshot or dependency-signing mechanism. */
+CC_API int cc_ipa_module_verify_signature(const cc_ipa_module *module, cc_ipa_signature_status *status);
 /* Load trusted native code in this process with RTLD_NOW|RTLD_LOCAL, then
  * instantiate an ordinary C IPA. Loading is lazy and shared by all instances.
  * Detects replacement/modification since inspection (-ESTALE), missing factory
  * (-ENOENT), and dynamic-link failure (-ENOEXEC). Do not modify module files or
- * their dependencies concurrently. Inspection/signature bytes are not a trust
+ * their dependencies concurrently. Inspection/signature-byte access alone is not a trust
  * check or sandbox. Linux /proc/self/maps identifies the loaded file, rejecting
  * stale dynamic-linker path caches. This does not load upstream C++ IPA binaries.
  * *ipa is NULL on error; success may be passed to cc_capture_set_ipa as usual. */

@@ -312,6 +312,25 @@ int cc_ipa_module_create_proxy(cc_ipa_module *module, const void *data, size_t s
     if (!module) { if (out) *out = NULL; return -EINVAL; }
     return create_proxy(CC_IPA_PROXY_MODULE, module, data, size, options, -1, NULL, out);
 }
+int cc_ipa_module_create_auto(cc_ipa_module *module, const void *data, size_t size,
+                              const cc_ipa_auto_options *options, cc_ipa **out, cc_ipa_execution_mode *mode)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (!module || (size && !data) || (options &&
+        ((options->flags & ~(uint32_t)CC_IPA_AUTO_FORCE_ISOLATION) || options->proxy.timeout_ms < -1))) return -EINVAL;
+    cc_ipa_signature_status status = CC_IPA_SIGNATURE_UNAVAILABLE;
+    int ret = 0;
+    if (!options || !(options->flags & CC_IPA_AUTO_FORCE_ISOLATION))
+        ret = cc_ipa_module_verify_signature(module, &status);
+    if (ret < 0) return ret;
+    cc_ipa_execution_mode selected = status == CC_IPA_SIGNATURE_VALID ?
+        CC_IPA_EXECUTION_IN_PROCESS : CC_IPA_EXECUTION_ISOLATED;
+    ret = selected == CC_IPA_EXECUTION_IN_PROCESS ? cc_ipa_module_create(module, data, size, out) :
+        cc_ipa_module_create_proxy(module, data, size, options ? &options->proxy : NULL, out);
+    if (!ret && mode) *mode = selected;
+    return ret;
+}
 int cc_ipa_reference_create_proxy(const cc_ipa_reference_tuning *tuning, const cc_ipa_proxy_options *options, cc_ipa **out)
 {
     if (!out) return -EINVAL;

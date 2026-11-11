@@ -157,7 +157,10 @@ static void parent_exit(void)
     }
     OK(close(pipes[1])); int worker; CHECK(read(pipes[0], &worker, sizeof(worker)) == sizeof(worker)); OK(close(pipes[0]));
     int status; CHECK(waitpid(parent, &status, 0) == parent && WIFEXITED(status) && !WEXITSTATUS(status));
-    CHECK(waitpid(worker, &status, 0) == worker && WIFEXITED(status) && !WEXITSTATUS(status));
+    pid_t waited = waitpid(worker, &status, 0);
+    if (waited != worker || !WIFEXITED(status) || WEXITSTATUS(status))
+        fprintf(stderr, "Parent-exit worker: waitpid=%ld status=%#x errno=%d\n", (long)waited, status, errno);
+    CHECK(waited == worker && WIFEXITED(status) && !WEXITSTATUS(status));
     OK(prctl(PR_SET_CHILD_SUBREAPER, subreaper));
 }
 static void traces(void)

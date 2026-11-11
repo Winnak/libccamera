@@ -82,8 +82,8 @@ colour/black-level/lens-shading/gamma tuning remain pending. The C ABI supports
 caller-registered and explicitly loaded shared C modules; upstream C++ IPA binaries
 need a bridge. Directory discovery and pipeline/version selection are available;
 the [IPC worker/proxy](IPC.md) supports isolated C modules and built-in controllers
-on the current VC4/CFE/PiSP graphs and the existing VIMC mock. Signature
-verification remains pending. Simulations prove
+on the current VC4/CFE/PiSP graphs and the existing VIMC mock. Optional RSA
+signature verification controls automatic native-module execution. Simulations prove
 feedback and lifecycle behavior, not physical image quality.
 
 ## Loading shared C modules
@@ -144,9 +144,10 @@ A shared module exports two symbols with default visibility and C linkage:
 
 These modules execute trusted code in the calling process. The optional
 `.sign` sidecar beside the resolved module is copied as opaque bytes (up to 1 MiB),
-available through `cc_ipa_module_get_signature`; it is not verified. Missing or unreadable signatures
-are empty. Direct module loading does not search directories. No automatic fallback,
-trust policy or sandbox is implied. C++ libcamera IPA binaries use a different interface. A module calling
+available through `cc_ipa_module_get_signature`. Missing or unreadable signatures
+are empty. The explicit `cc_ipa_module_create` API does not check signatures;
+use the verification or automatic creation APIs below to apply the signing policy.
+Direct module loading does not search directories. C++ libcamera IPA binaries use a different interface. A module calling
 other libccamera APIs must link those symbols normally; a statically linked host
 does not automatically export its library symbols to plugins.
 
@@ -204,7 +205,7 @@ returned directly, without trying lower-priority modules. Reopen the manager to
 discover filesystem changes; existing IPA instances keep their code after the
 manager closes. Created IPAs use the same capture adoption/restart/cancellation
 lifecycle as directly loaded modules. Creation loads trusted in-process code;
-the manager does not verify signatures. Use `cc_ipa_manager_create_proxy` from
+the explicit manager create API does not verify signatures. Use `cc_ipa_manager_create_proxy` from
 `ccamera/ipa_proxy.h` for a separate worker with user/network namespaces; see
 [isolated C IPAs](IPC.md#isolated-c-ipas).
 
@@ -296,3 +297,60 @@ enables AE/AWB as before. For example:
 ```sh
 ./build/ccamera-cfe-capture -c 0 -w 1640 -h 1232 -f pRAA -g -j -p -n 120 -o frames.rgb
 ```
+
+
+## Signed modules and automatic execution
+
+Build with `-DCCAMERA_WITH_IPA_CRYPTO=ON` to enable OpenSSL 3+ **libcrypto**
+verification. Crypto is off by default; disabled builds discover no OpenSSL,
+generate no keys, and retain their libc-only requirements. See
+[build and packaging configuration](BUILDING.md#optional-ipa-signing).
+
+`cc_ipa_module_verify_signature(module, &status)` and
+`cc_ipa_manager_verify_signature(manager, index, &status)` inspect the complete
+retained module file against the `.sign` bytes captured at inspection. They never
+load the module or execute constructors. The status is one of
+`CC_IPA_SIGNATURE_VALID`, `MISSING`, `INVALID` or `UNAVAILABLE` (all have the
+`CC_IPA_SIGNATURE_` prefix). Absent/unreadable sidecars are missing; readable empty,
+malformed, wrong-key or mismatched signatures are invalid. Disabled builds return
+unavailable. The return value separately reports operational errors as negative
+errno values; status stays unchanged on error. File identity is checked before
+and after verification, and replacement/modification returns `-ESTALE`.
+
+Include `<ccamera/ipa_proxy.h>` for automatic creation:
+
+```c
+cc_ipa_auto_options options = {0}; /* Optional: .proxy.worker_path / timeout_ms. */
+cc_ipa_execution_mode mode;
+cc_ipa *ipa = NULL;
+int ret = cc_ipa_module_create_auto(module, data, size, &options, &ipa, &mode);
+/* On success: IN_PROCESS for verified modules, ISOLATED for other statuses. */
+```
+
+The execution constants are `CC_IPA_EXECUTION_IN_PROCESS` and
+`CC_IPA_EXECUTION_ISOLATED`. `cc_ipa_manager_create_auto` adds the same options
+and optional mode output after the existing selection and factory arguments.
+NULL options selects defaults; NULL mode omits reporting. Set
+`.flags = CC_IPA_AUTO_FORCE_ISOLATION` to select a worker even for a valid signature.
+Automatic factory data must be a relocatable byte schema because either process
+may consume it. Created IPAs retain the existing ownership and capture-adoption
+rules. Errors leave `*ipa = NULL` and mode unchanged.
+
+Only a valid signature selects in-process execution. Missing, invalid or
+unavailable verification selects the existing worker with user/network namespaces.
+Operational verification errors, factory failures and worker failures propagate;
+there is no retry in another mode or with a lower-priority module. In particular,
+unavailable namespaces do not permit in-process execution. Discovery still
+selects the first matching module, even if a later one has a valid signature.
+Built-in controllers and explicit in-process/proxy creation retain their policies.
+
+Verification uses the embedded DER SubjectPublicKeyInfo, SHA-256 and RSA PKCS#1
+v1.5 padding. It accepts binary libcamera-compatible `openssl dgst -sha256 -sign`
+sidecars. Runtime trust comes exclusively from the embedded key, with no runtime
+key option or trust store. Only native C IPA modules are supported.
+
+Pathname loading and `$ORIGIN` dependency resolution remain in use. The accepted
+contract requires modules and their dependencies to remain trusted and unchanged
+during verification/loading. Identity checks detect changes but do not make an
+immutable verified snapshot; signatures do not cover dependencies. This feature
+does not encrypt frames or add C++ IPA binary compatibility.

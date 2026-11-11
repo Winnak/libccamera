@@ -252,6 +252,11 @@ int cc_ipa_manager_get_signature(const cc_ipa_manager *manager, size_t index, co
     if (!manager || index >= manager->count) return -EINVAL;
     return cc_ipa_module_get_signature(manager->modules[index], data, size);
 }
+int cc_ipa_manager_verify_signature(const cc_ipa_manager *manager, size_t index, cc_ipa_signature_status *status)
+{
+    if (!manager || index >= manager->count) return -EINVAL;
+    return cc_ipa_module_verify_signature(manager->modules[index], status);
+}
 int cc_ipa_manager_select(const cc_ipa_manager *manager, const char *pipeline, uint32_t minimum,
                           uint32_t maximum, const char *name, size_t *index)
 {
@@ -285,4 +290,16 @@ int cc_ipa_manager_create_proxy(cc_ipa_manager *manager, const char *pipeline, u
     int ret = cc_ipa_manager_select(manager, pipeline, minimum, maximum, name, &index);
     if (ret < 0) return ret;
     return cc_ipa_module_create_proxy(manager->modules[index], data, size, options, out);
+}
+int cc_ipa_manager_create_auto(cc_ipa_manager *manager, const char *pipeline, uint32_t minimum,
+                               uint32_t maximum, const char *name, const void *data, size_t size,
+                               const cc_ipa_auto_options *options, cc_ipa **out, cc_ipa_execution_mode *mode)
+{
+    if (!out) return -EINVAL;
+    *out = NULL;
+    if (size && !data) return -EINVAL;
+    size_t index;
+    int ret = cc_ipa_manager_select(manager, pipeline, minimum, maximum, name, &index);
+    if (ret < 0) return ret;
+    return cc_ipa_module_create_auto(manager->modules[index], data, size, options, out, mode);
 }

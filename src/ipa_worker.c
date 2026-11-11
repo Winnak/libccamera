@@ -209,7 +209,10 @@ int main(int argc, char **argv)
             uint32_t capabilities[] = {cc_ipa_get_capabilities(ipa), vimc_flags};
             int sent = respond(pipe, &header, ret, capabilities, vimc ? sizeof(capabilities) : sizeof(capabilities[0]));
             cc_ipc_packet_destroy(packet); free(input);
-            if (ret < 0 || sent < 0) { exit_code = 5; break; }
+            /* The parent can exit immediately after reading the reply, before
+             * flush_reply finishes its peer check. Treat that disconnect like
+             * the normal -EPIPE receive path above. */
+            if (ret < 0 || sent < 0) { exit_code = sent == -EPIPE ? 0 : 5; break; }
             ready = true; continue;
         }
         int output_fds[CC_IPA_WIRE_MAX_FDS]; uint32_t num_output_fds = 0;
@@ -218,7 +221,7 @@ int main(int argc, char **argv)
         bool destroyed = header.command == CC_IPA_PROXY_DESTROY && !ret;
         if (destroyed) ipa = NULL;
         int sent = respond_fds(pipe, &header, ret, output, output_size, output_fds, num_output_fds); free(output);
-        if (sent < 0) { exit_code = 4; break; }
+        if (sent < 0) { exit_code = sent == -EPIPE ? 0 : 4; break; }
         if (destroyed) break;
     }
     if (module >= 0) close(module);
