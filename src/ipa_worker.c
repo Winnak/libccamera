@@ -81,11 +81,13 @@ static int initialise(const void *data, size_t size, int module_fd, const char *
     }
     if (trace_fd >= 0) return -EPROTO;
     if (init.kind == CC_IPA_PROXY_VC4_DEFAULT) return size ? -EPROTO : cc_ipa_vc4_create(NULL, ipa);
+    if (init.kind == CC_IPA_PROXY_PISP_DEFAULT) return size ? -EPROTO : cc_ipa_pisp_create(NULL, ipa);
     enum cc_ipa_wire_kind kind = init.kind == CC_IPA_PROXY_REFERENCE ? CC_IPA_WIRE_REFERENCE : CC_IPA_WIRE_VC4;
-    if (init.kind != CC_IPA_PROXY_REFERENCE && init.kind != CC_IPA_PROXY_VC4) return -EPROTO;
+    if (init.kind != CC_IPA_PROXY_REFERENCE && init.kind != CC_IPA_PROXY_VC4 && init.kind != CC_IPA_PROXY_PISP) return -EPROTO;
     cc_ipa_wire *wire = NULL; int ret = cc_ipa_wire_decode(kind, bytes, size, &wire);
     if (!ret) ret = init.kind == CC_IPA_PROXY_REFERENCE ? cc_ipa_reference_create(cc_ipa_wire_object(wire), ipa) :
-                                                        cc_ipa_vc4_create(cc_ipa_wire_object(wire), ipa);
+        init.kind == CC_IPA_PROXY_PISP ? cc_ipa_pisp_create(cc_ipa_wire_object(wire), ipa) :
+        cc_ipa_vc4_create(cc_ipa_wire_object(wire), ipa);
     cc_ipa_wire_destroy(wire); return ret;
 }
 static int vimc_map(struct cc_ipa_vimc *vimc, const cc_ipc_packet *packet)

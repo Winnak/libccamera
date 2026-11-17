@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "vc4_tuning_vectors.h"
 #define CHECK(x)                                                                                             \
     do {                                                                                                     \
         if (!(x)) {                                                                                          \
@@ -161,6 +162,139 @@ static void profile(void)
     t.lens_shading[0][0] = NAN;
     CHECK(cc_vc4_validate_tuning(&t) == -EINVAL);
 }
+static void profile_vectors(void)
+{
+    cc_sensor_geometry g = {.active = {16, 8, 4096, 3072}, .width = 4096, .height = 3072};
+    for (size_t i = 0; i < sizeof(vc4_vectors) / sizeof(vc4_vectors[0]); ++i) {
+        const struct vc4_vector *v = &vc4_vectors[i];
+        g.crop = v->crop ? (cc_rectangle){1040, 776, 2048, 1536} : g.active;
+        g.hflip = v->flips & 1U;
+        g.vflip = (v->flips >> 1) & 1U;
+        cc_vc4_tuning t;
+        OK(cc_vc4_build_tuning(v->profile, &g, v->ct, v->gain, &t));
+        OK(cc_vc4_validate_tuning(&t));
+        CHECK(t.black.black_level_r == v->black && t.black.black_level_g == v->black &&
+              t.black.black_level_b == v->black);
+        for (unsigned j = 0; j < 9; ++j) {
+            struct bcm2835_isp_rational r = t.ccm.ccm.ccm[j / 3][j % 3];
+            CHECK(r.den == 1000 && abs(r.num - v->ccm[j]) <= 1);
+        }
+        for (unsigned j = 0; j < 33; ++j)
+            CHECK(abs((int)t.gamma.y[j] - (int)v->gamma[j]) <= 1);
+        CHECK(t.geq.offset == v->geq_offset && abs(t.geq.slope.num - v->geq_slope) <= 1 &&
+              abs(t.denoise.slope.num - v->noise_slope) <= 1);
+        for (unsigned ch = 0; ch < 3; ++ch)
+            for (unsigned j = 0; j < 6; ++j)
+                CHECK(fabs(t.lens_shading[ch][lsc_indices[j]] - v->lsc[ch][j]) < 1e-11);
+        cc_vc4_tuning saved = t;
+        CHECK(cc_vc4_build_tuning(v->profile, &g, NAN, 1, &t) == -EINVAL);
+        CHECK(!memcmp(&saved, &t, sizeof(t)));
+        CHECK(cc_vc4_build_tuning(v->profile, &g, 4500, INFINITY, &t) == -EINVAL);
+        CHECK(!memcmp(&saved, &t, sizeof(t)));
+        CHECK(cc_vc4_build_tuning(CC_VC4_PROFILE_AUTO, &g, 4500, 1, &t) == -EINVAL);
+        CHECK(!memcmp(&saved, &t, sizeof(t)));
+    }
+}
+static void selection(void)
+{
+    CHECK(!cc_vc4_get_profile_info(CC_VC4_PROFILE_AUTO));
+    CHECK(!cc_vc4_get_profile_info((enum cc_vc4_profile)-1));
+    for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++i) {
+        enum cc_vc4_profile id = (enum cc_vc4_profile)i, selected = CC_VC4_PROFILE_AUTO;
+        const cc_vc4_profile_info *p = cc_vc4_get_profile_info(id);
+        CHECK(p && p->profile == id && strstr(p->calibration_id, p->name));
+        OK(cc_vc4_lookup_profile(p->name, &selected)); CHECK(selected == id);
+        const cc_sensor_model *model;
+        OK(cc_sensor_lookup(p->sensor_model, &model));
+        OK(cc_vc4_select_profile(model, id, &selected)); CHECK(selected == id);
+        OK(cc_vc4_select_profile(model, CC_VC4_PROFILE_AUTO, &selected));
+        CHECK(!strcmp(cc_vc4_get_profile_info(selected)->name, p->sensor_model));
+        CHECK((p->flags & CC_VC4_PROFILE_NOIR) == (strstr(p->name, "noir") ? CC_VC4_PROFILE_NOIR : 0));
+        CHECK(cc_vc4_select_profile(model, (enum cc_vc4_profile)999, &selected) == -EINVAL);
+        enum cc_vc4_profile saved = selected;
+        CHECK(cc_vc4_lookup_profile("imx708_typo", &selected) == -ENOENT && selected == saved);
+        CHECK(cc_vc4_lookup_profile(NULL, &selected) == -EINVAL && selected == saved);
+    }
+    const cc_sensor_model *sensor;
+    OK(cc_sensor_lookup("imx219", &sensor));
+    enum cc_vc4_profile selected = CC_VC4_PROFILE_IMX477;
+    CHECK(cc_vc4_select_profile(sensor, CC_VC4_PROFILE_IMX708_WIDE, &selected) == -ENOTSUP);
+    CHECK(selected == CC_VC4_PROFILE_IMX477);
+    OK(cc_sensor_lookup("imx290", &sensor));
+    CHECK(cc_vc4_select_profile(sensor, CC_VC4_PROFILE_AUTO, &selected) == -ENOTSUP);
+    CHECK(selected == CC_VC4_PROFILE_IMX477);
+}
+
+static void module_controllers(void)
+{
+    for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++i) {
+        enum cc_vc4_profile id = (enum cc_vc4_profile)i;
+        const cc_vc4_profile_info *p = cc_vc4_get_profile_info(id);
+        cc_ipa_configuration c = configuration();
+        OK(cc_sensor_lookup(p->sensor_model, &c.sensor));
+        if (strcmp(p->sensor_model, "ov5647")) {
+            c.sensor_controls[1].minimum = 0;
+            c.sensor_controls[1].maximum = !strcmp(p->sensor_model, "imx219") ? 232 : 960;
+            c.initial_controls[1].value = 0;
+        }
+        cc_ipa_vc4_options options = {.mains_hz = 50, .profile = id};
+        cc_ipa *ipa;
+        OK(create_controller(&options, &ipa));
+        OK(cc_ipa_configure(ipa, &c));
+        OK(cc_ipa_start(ipa));
+        uint32_t code;
+        OK(cc_sensor_gain_code(c.sensor, 2, &code));
+        cc_control manual[] = {{.id = V4L2_CID_EXPOSURE, .value = 500},
+            {.id = V4L2_CID_ANALOGUE_GAIN, .value = code}};
+        cc_ipa_request request = {.timing = c.timing, .timing_limits = c.timing_limits,
+            .sensor_controls = manual, .num_sensor_controls = 2};
+        cc_ipa_settings s;
+        OK(cc_ipa_prepare(ipa, &request, &s));
+        CHECK(s.flags == CC_IPA_VC4_TUNING && s.sensor_controls[2].value == code);
+        cc_vc4_tuning expected;
+        OK(cc_vc4_build_tuning(id, &c.geometry, 4500, 2, &expected));
+        CHECK(!memcmp(&s.vc4, &expected, sizeof(expected)));
+        struct bcm2835_isp_stats stats = {.size = sizeof(stats)};
+        for (unsigned j = 0; j < 192; ++j)
+            stats.awb_stats[j] = (struct bcm2835_isp_stats_region){.counted = 1000,
+                .r_sum = 1000000, .g_sum = 2000000, .b_sum = 1500000};
+        for (unsigned j = 0; j < 15; ++j) stats.agc_stats[j] = stats.awb_stats[j];
+        if (p->flags & CC_VC4_PROFILE_NOIR) {
+            /* Both tails are coloured outliers. The middle half still has
+             * R/G/B = 1/2/1.5, independently for each channel's ordering. */
+            for (unsigned j = 0; j < 96; ++j) {
+                stats.awb_stats[j].r_sum = j < 48 ? 100000 : 4000000;
+                stats.awb_stats[j].b_sum = j < 48 ? 4000000 : 800000;
+            }
+        }
+        stats.hist[0].g_hist[32] = 1000;
+        cc_ipa_frame frame = {.vc4 = &s.vc4, .statistics_fourcc = c.statistics_fourcc,
+            .statistics_data = &stats, .statistics_size = sizeof(stats), .isp_controls = s.isp_controls,
+            .num_isp_controls = s.num_isp_controls, .request_sensor_controls = manual,
+            .num_request_sensor_controls = 2};
+        frame.sensor.count = 3;
+        memcpy(frame.sensor.controls, s.sensor_controls, sizeof(cc_control) * 3);
+        cc_ipa_metadata m;
+        OK(cc_ipa_process(ipa, &frame, &m));
+        CHECK(m.analogue_gain == 2 && m.flags & CC_IPA_AE_CONVERGED && m.flags & CC_IPA_METADATA_AWB);
+        OK(cc_ipa_prepare(ipa, &request, &s));
+        if (p->flags & CC_VC4_PROFILE_NOIR) {
+            CHECK(s.vc4.colour_temperature == 4500);
+            CHECK(s.isp_controls[0].value == 1399 && s.isp_controls[1].value == 1133);
+        }
+        manual[1].value = c.sensor_controls[1].maximum + 1;
+        CHECK(cc_ipa_prepare(ipa, &request, &s) == -ERANGE);
+        cc_ipa_stop(ipa);
+        /* Restart and profile mismatch must not reuse a previous calibration. */
+        OK(cc_ipa_configure(ipa, &c)); OK(cc_ipa_start(ipa)); cc_ipa_stop(ipa);
+        OK(cc_sensor_lookup(!strcmp(p->sensor_model, "ov5647") ? "imx219" : "ov5647", &c.sensor));
+        CHECK(cc_ipa_configure(ipa, &c) == -ENOTSUP);
+        cc_ipa_destroy(ipa);
+    }
+    cc_ipa *ipa = NULL;
+    cc_ipa_vc4_options bad = {.profile = (enum cc_vc4_profile)999};
+    CHECK(create_controller(&bad, &ipa) == -EINVAL && !ipa);
+}
 static void flicker(void)
 {
     cc_ipa_configuration c = configuration();
@@ -244,24 +378,34 @@ static void controller(void)
     cc_ipa_vc4_options bad = {.mains_hz = 42};
     CHECK(create_controller(&bad, &ipa) == -EINVAL && !ipa);
 }
-static void feedback(void)
+static void feedback(enum cc_vc4_profile profile)
 {
     cc_ipa_configuration c = configuration();
-    cc_ipa_vc4_options o = {.mains_hz = 50, .red_gain = 1, .blue_gain = 1};
+    const cc_vc4_profile_info *p = cc_vc4_get_profile_info(profile);
+    OK(cc_sensor_lookup(p->sensor_model, &c.sensor));
+    if (strcmp(p->sensor_model, "ov5647")) {
+        c.sensor_controls[1].minimum = 0;
+        c.sensor_controls[1].maximum = !strcmp(p->sensor_model, "imx219") ? 232 : 960;
+        c.initial_controls[1].value = 0;
+    }
+    /* Exercise AUTO selection too: no variant flags means the standard profile. */
+    cc_ipa_vc4_options o = {.mains_hz = 50, .red_gain = 1, .blue_gain = 1,
+        .profile = p->flags ? profile : CC_VC4_PROFILE_AUTO};
     cc_ipa *ipa;
     OK(create_controller(&o, &ipa));
     OK(cc_ipa_configure(ipa, &c));
     OK(cc_ipa_start(ipa));
     cc_ipa_request request = {.timing = c.timing, .timing_limits = c.timing_limits};
     unsigned stable = 0;
-    for (unsigned iteration = 0; iteration < 100; ++iteration) {
+    for (unsigned iteration = 0; iteration < 160; ++iteration) {
         cc_ipa_settings s;
         OK(cc_ipa_prepare(ipa, &request, &s));
         uint32_t exposure = (uint32_t)s.sensor_controls[1].value;
-        double gain = (double)s.sensor_controls[2].value / 16;
+        double gain;
+        OK(cc_sensor_gain(c.sensor, (uint32_t)s.sensor_controls[2].value, &gain));
         uint64_t ns;
         OK(cc_sensor_exposure_time(c.sensor, &request.timing, exposure, &ns));
-        double level = (double)ns * gain / (iteration < 50 ? 40000000 : 160000000);
+        double level = (double)ns * gain / (iteration < 80 ? 40000000 : 160000000);
         if (level > 0.99)
             level = 0.99;
         uint64_t sum = (uint64_t)(level * 8192 * 1000);
@@ -284,11 +428,11 @@ static void feedback(void)
         memcpy(frame.sensor.controls, s.sensor_controls, 3 * sizeof(cc_control));
         cc_ipa_metadata m;
         OK(cc_ipa_process(ipa, &frame, &m));
-        if (iteration == 50)
+        if (iteration == 80)
             stable = 0;
         stable = (m.flags & CC_IPA_AE_CONVERGED) ? stable + 1 : 0;
         CHECK(m.flags & CC_IPA_AWB_CONVERGED);
-        if (iteration == 49 || iteration == 99)
+        if (iteration == 79 || iteration == 159)
             CHECK(stable >= 3);
         request.timing.vblank = (uint32_t)s.sensor_controls[0].value;
     }
@@ -306,9 +450,13 @@ int main(int argc, char **argv)
     }
     live_geometry();
     profile();
+    profile_vectors();
+    selection();
+    module_controllers();
     flicker();
     controller();
-    feedback();
-    puts("OV5647 native profile, geometry, flicker and still controller passed");
+    for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++i)
+        feedback((enum cc_vc4_profile)i);
+    puts("VC4 module profiles, calibration vectors, geometry, flicker and still controllers passed");
     return 0;
 }

@@ -54,6 +54,8 @@ CC_API int cc_ipa_reference_create_proxy(const cc_ipa_reference_tuning *tuning,
                                          const cc_ipa_proxy_options *options, cc_ipa **ipa);
 CC_API int cc_ipa_vc4_create_proxy(const cc_ipa_vc4_options *controller_options,
                                    const cc_ipa_proxy_options *options, cc_ipa **ipa);
+CC_API int cc_ipa_pisp_create_proxy(const cc_ipa_pisp_options *controller_options,
+                                   const cc_ipa_proxy_options *options, cc_ipa **ipa);
 CC_API int cc_ipa_manager_create_proxy(cc_ipa_manager *manager, const char *pipeline_name,
                                        uint32_t minimum_version, uint32_t maximum_version, const char *name,
                                        const void *data, size_t size, const cc_ipa_proxy_options *options, cc_ipa **ipa);

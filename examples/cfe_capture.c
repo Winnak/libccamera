@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <ccamera/capture.h>
+#include <linux/videodev2.h>
 #include <ccamera/pisp_be.h>
 
 #include <errno.h>
@@ -69,7 +70,7 @@ static void print_format(const char *name, const cc_format *format)
 static void usage(const char *program)
 {
     fprintf(stderr, "Usage: %s [-c index | -I ID] -w width -h height -f FOURCC\n"
-            "          [-n frames] [-o bayer.raw] [-s statistics.bin] [-g] [-j]\n"
+            "          [-n frames] [-o bayer.raw] [-s statistics.bin] [-g] [-j] [-q PROFILE]\n"
             "          [-b FE-FOURCC] [-k compression-black-level-offset]\n"
             "          [-p [-i /dev/mediaN] [-F FOURCC] [-A FOURCC] [-a auxiliary.raw]]\n"
             "          [-W width -H height] [-U aux-width -V aux-height]\n"
@@ -83,6 +84,8 @@ static void usage(const char *program)
             "-p adds PiSP BE demosaic (default full-size linear sensor RGB24).\n"
             "-F selects RGB/YUV output; -A/-a enables output1 (default YU12).\n"
             "-g adds reference automatic exposure, and white balance with -p.\n"
+            "-q auto/NAME adds calibrated PiSP photo processing and AE/AWB (implies -p);\n"
+            "use a module name from ccamera-still --list-profiles; excludes -g/-j.\n"
             "-j adds the standard V3/IMX708 continuous autofocus profile (opt-in).\n"
             "Transforms: 0 none, 1 horizontal flip, 2 vertical flip, 3 both.\n",
             program);
@@ -91,7 +94,8 @@ static void usage(const char *program)
 int main(int argc, char **argv)
 {
     uint32_t index = 0, frames = 10;
-    bool process = false, auxiliary = false, automatic = false, autofocus = false;
+    bool process = false, auxiliary = false, automatic = false, autofocus = false, calibrated = false;
+    cc_ipa_pisp_options photo={.mains_hz=50};
     bool index_selected=false;
     cc_cfe_configuration configuration = {0};
     cc_format output_format = { .fourcc = CC_FOURCC('R', 'G', 'B', '3') };
@@ -100,7 +104,7 @@ int main(int argc, char **argv)
     uint32_t transforms[2] = {0};
     const char *output_path = NULL, *statistics_path = NULL, *be_path = NULL, *auxiliary_path = NULL, *camera_id=NULL;
     int option;
-    while ((option = getopt(argc, argv, "pgjc:I:w:h:f:b:k:n:o:s:i:F:A:a:W:H:U:V:r:R:t:T:")) != -1) {
+    while ((option = getopt(argc, argv, "pgjq:c:I:w:h:f:b:k:n:o:s:i:F:A:a:W:H:U:V:r:R:t:T:")) != -1) {
         int ret = 0;
         switch (option) {
         case 'c': index_selected=true; ret = number(optarg, &index); break;
@@ -114,6 +118,10 @@ int main(int argc, char **argv)
         case 'p': process = true; break;
         case 'g': automatic = true; break;
         case 'j': autofocus = true; break;
+        case 'q':
+            process=calibrated=true;
+            ret=!strcmp(optarg,"auto") ? (photo.profile=CC_VC4_PROFILE_AUTO,0) : cc_vc4_lookup_profile(optarg,&photo.profile);
+            break;
         case 'i': process = true; be_path = optarg; break;
         case 'a': process = auxiliary = true; auxiliary_path = optarg; break;
         case 'W': process = true; ret = number(optarg, &output_format.width); break;
@@ -149,6 +157,7 @@ int main(int argc, char **argv)
     if (optind != argc || (camera_id && (index_selected || !camera_id[0] ||
         strnlen(camera_id,CC_CAMERA_ID_MAX)==CC_CAMERA_ID_MAX)) || !configuration.sensor.width || !configuration.sensor.height ||
         !configuration.sensor.fourcc || !frames || configuration.compression_offset>UINT16_MAX ||
+        (calibrated && (automatic || autofocus)) ||
         (output_path && statistics_path && !strcmp(output_path, statistics_path)) ||
         (auxiliary_path && output_path && !strcmp(auxiliary_path, output_path)) ||
         (auxiliary_path && statistics_path && !strcmp(auxiliary_path, statistics_path))) {
@@ -188,6 +197,15 @@ int main(int argc, char **argv)
     if (ret < 0)
         goto done;
     if (process) {
+        if (calibrated) {
+            cc_format *formats[]={&output_format,&auxiliary_format};
+            for (unsigned i=0;i<2;++i) {
+                formats[i]->colorspace=V4L2_COLORSPACE_JPEG;
+                formats[i]->xfer_func=V4L2_XFER_FUNC_SRGB;
+                formats[i]->ycbcr_enc=V4L2_YCBCR_ENC_601;
+                formats[i]->quantization=V4L2_QUANTIZATION_FULL_RANGE;
+            }
+        }
         ret = cc_pisp_be_open(be_path, &be);
         if (ret < 0) goto done;
         cc_pisp_be_configuration c = { .input = configuration.image, .output = output_format,
@@ -209,7 +227,23 @@ int main(int argc, char **argv)
     ret = cc_capture_create(&devices, &capture, &request_count);
     if (ret < 0) goto done;
     cfe = NULL; be = NULL; /* The request graph now owns both devices. */
-    if (automatic || autofocus) {
+    if (calibrated) {
+        const cc_sensor_model *sensor; cc_sensor_timing timing;
+        ret=cc_capture_get_sensor(capture,&sensor);
+        if (!ret) ret=cc_pisp_select_profile(sensor,photo.profile,&photo.profile);
+        if (!ret) ret=cc_capture_configure_sensor_defaults(capture);
+        if (!ret) ret=cc_capture_get_sensor_timing(capture,&timing);
+        uint64_t duration;
+        if (!ret) ret=cc_sensor_frame_duration(&timing,&duration);
+        cc_sensor_mode_description mode={.width=image->width,.height=image->height,.binning_x=1,.scale_x=1};
+        cc_sensor_mode_policy policy;
+        if (!ret) { mode.min_frame_duration_ns=duration; ret=cc_sensor_get_mode_policy(sensor,&mode,&policy); }
+        if (!ret) ret=cc_capture_configure_sensor_policy(capture,&policy);
+        if (!ret) ret=cc_ipa_pisp_create(&photo,&ipa);
+        if (!ret) ret=cc_capture_set_ipa(capture,&ipa);
+        if (ret<0) goto done;
+        fprintf(stderr,"PiSP photo profile=%s (not hardware validated)\n",cc_pisp_get_profile_info(photo.profile)->calibration_id);
+    } else if (automatic || autofocus) {
         ret = automatic ? cc_capture_configure_sensor_defaults(capture):0;
         cc_af_tuning af; cc_af_reference_tuning(&af);
         if (!ret && autofocus) {

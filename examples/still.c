@@ -93,7 +93,8 @@ static int disable_auto(cc_camera *camera)
 static int metadata(const char *path, const struct row *rows, size_t n, const cc_sensor_trace *trace,
                     size_t traces, uint64_t dropped, const cc_format *raw, const cc_format *rgb,
                     const cc_sensor_geometry *geometry, const uint32_t delays[4], const char *diagnostic,
-                    int status, const cc_sensor_timing *timing, enum cc_orientation orientation)
+                    int status, const cc_sensor_timing *timing, enum cc_orientation orientation,
+                    const cc_vc4_profile_info *profile)
 {
     if (!path)
         return 0;
@@ -111,7 +112,7 @@ static int metadata(const char *path, const struct row *rows, size_t n, const cc
             "fourcc\":%u,\"width\":%u,\"height\":%u,\"raw_stride\":%u,\"rgb_stride\":%u,\"crop\":[%d,%d,%u,%"
             "u],\"delays\":[%u,%u,%u,%u],\"trace_dropped\":%" PRIu64
             ",\"orientation\":%u,\"hflip\":%u,\"vflip\":%u}\n",
-            cc_vc4_ov5647_profile_id(), diagnostic ? diagnostic : "", status, raw->fourcc, raw->width,
+            profile ? profile->calibration_id : "", diagnostic ? diagnostic : "", status, raw->fourcc, raw->width,
             raw->height, raw->planes[0].stride, rgb->planes[0].stride, geometry->crop.x, geometry->crop.y,
             geometry->crop.width, geometry->crop.height, delays[0], delays[1], delays[2], delays[3], dropped,
             (unsigned)orientation, geometry->hflip, geometry->vflip);
@@ -148,16 +149,20 @@ static void usage(void)
 {
     puts("ccamera-still [-c INDEX | -I ID] [-o photo.ppm] [--metadata run.jsonl] [--raw frame.raw]\n"
          "  [--statistics frame.bsta] [--flicker off|50|60] [--timeout-ms 10000]\n"
-         "  [--shutter-us N] [--gain-code N] [--colour-gains R,B]\n"
+         "  [--shutter-us N] [--gain-code N] [--colour-gains R,B] [--profile NAME]\n"
+         "  [--list-profiles]\n"
          "  [--exposure-delay N] [--gain-delay N] [--vblank-delay N] [--hblank-delay N]\n"
          "  [--diagnostic exposure|gain|vblank --frames 96]\n"
-         "Standard colour OV5647 on Pi 4/earlier only. Uses full-resolution mode.\n"
-         "Diagnostics use fixed illumination and settings; logs are written after capture.\n"
+         "OV5647, IMX219, IMX477 and IMX708 on Pi 4/earlier. Uses full-resolution mode.\n"
+         "Defaults to standard colour; select NoIR/wide modules explicitly.\n"
+         "Only Pi 4/OV5647 has a physical acceptance target; validation is pending.\n"
+         "Diagnostics require OV5647, fixed illumination and settings.\n"
          "Run ccamera-capture -l to choose a discovery index or camera ID.");
 }
 int main(int argc, char **argv)
 {
-    enum { FLICKER = 256, TIMEOUT, SHUTTER, GAIN, WB, ED, GD, VD, HD, META, RAW, STATS, DIAG, FRAMES, HELP };
+    enum { FLICKER = 256, TIMEOUT, SHUTTER, GAIN, WB, ED, GD, VD, HD, META, RAW, STATS, DIAG, FRAMES,
+           PROFILE, LIST_PROFILES, HELP };
     const struct option opts[] = {{"flicker", 1, 0, FLICKER},
                                   {"camera-id", 1, 0, 'I'},
                                   {"timeout-ms", 1, 0, TIMEOUT},
@@ -173,11 +178,14 @@ int main(int argc, char **argv)
                                   {"statistics", 1, 0, STATS},
                                   {"diagnostic", 1, 0, DIAG},
                                   {"frames", 1, 0, FRAMES},
+                                  {"profile", 1, 0, PROFILE},
+                                  {"list-profiles", 0, 0, LIST_PROFILES},
                                   {"help", 0, 0, HELP},
                                   {0, 0, 0, 0}};
     uint32_t index = 0, timeout = 10000, shutter = 0, gain = 0, delays[4] = {2, 2, 2, 2}, frames = 96;
     cc_ipa_vc4_options tuning = {.mains_hz = 50};
-    bool index_selected=false;
+    bool delay_override[4] = {false};
+    bool index_selected=false, gain_selected=false;
     const char *output = "photo.ppm", *meta = "capture.jsonl", *raw_path = NULL, *stats_path = NULL,
                *diagnostic = NULL, *camera_id=NULL;
     int opt, ret = 0;
@@ -194,6 +202,16 @@ int main(int argc, char **argv)
         case FLICKER:
             ret = !strcmp(optarg, "off") ? (tuning.mains_hz = 0, 0) : number(optarg, &tuning.mains_hz);
             break;
+        case PROFILE:
+            ret = cc_vc4_lookup_profile(optarg, &tuning.profile);
+            break;
+        case LIST_PROFILES:
+            for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++i) {
+                const cc_vc4_profile_info *p = cc_vc4_get_profile_info((enum cc_vc4_profile)i);
+                printf("%s: sensor=%s calibration=%s%s\n", p->name, p->sensor_model, p->calibration_id,
+                       p->flags & CC_VC4_PROFILE_GENERIC_LENS ? " (generic HQ lens calibration)" : "");
+            }
+            return 0;
         case TIMEOUT:
             ret = number(optarg, &timeout);
             break;
@@ -201,6 +219,7 @@ int main(int argc, char **argv)
             ret = number(optarg, &shutter);
             break;
         case GAIN:
+            gain_selected = true;
             ret = number(optarg, &gain);
             break;
         case WB: {
@@ -212,6 +231,7 @@ int main(int argc, char **argv)
         case GD:
         case VD:
         case HD:
+            delay_override[opt - ED] = true;
             ret = number(optarg, &delays[(unsigned)(opt - ED)]);
             break;
         case META:
@@ -252,7 +272,7 @@ int main(int argc, char **argv)
     cc_ipa *validated = NULL;
     ret = cc_ipa_vc4_create(&tuning, &validated);
     cc_ipa_destroy(validated);
-    if (ret < 0 || (gain && (gain < 16 || gain > 1023))) {
+    if (ret < 0) {
         usage();
         return 1;
     }
@@ -286,6 +306,7 @@ int main(int argc, char **argv)
     cc_vc4_configuration config = {0};
     cc_sensor_geometry geometry = {0};
     cc_sensor_timing timing = {0};
+    const cc_vc4_profile_info *profile = NULL;
     if (camera_id) ret=cc_camera_open_by_id(camera_id,&camera);
     else {
         ret=cc_enumerate(&list,&count);
@@ -305,14 +326,38 @@ int main(int argc, char **argv)
     ret = cc_camera_get_sensor(camera, &model);
     if (ret < 0)
         goto done;
-    if (strcmp(cc_sensor_get_properties(model)->model, "ov5647")) {
+    ret = cc_vc4_select_profile(model, tuning.profile, &tuning.profile);
+    if (ret < 0)
+        goto done;
+    profile = cc_vc4_get_profile_info(tuning.profile);
+    if (diagnostic && strcmp(profile->sensor_model, "ov5647")) {
+        fputs("Timing diagnostics currently require OV5647.\n", stderr);
         ret = -ENOTSUP;
         goto done;
     }
-    const uint32_t codes[] = {MEDIA_BUS_FMT_SBGGR10_1X10, MEDIA_BUS_FMT_SGBRG10_1X10,
-                              MEDIA_BUS_FMT_SGRBG10_1X10, MEDIA_BUS_FMT_SRGGB10_1X10};
-    cc_sensor_mode_request mode_request = {.mbus_codes = codes, .num_mbus_codes = 4,
-        .width = 2592, .height = 1944, .max_width = 2592, .max_height = 1944};
+    const cc_sensor_properties *sensor_properties = cc_sensor_get_properties(model);
+    for (unsigned i = 0; i < sensor_properties->num_delays; ++i) {
+        const uint32_t ids[] = {V4L2_CID_EXPOSURE, V4L2_CID_ANALOGUE_GAIN, V4L2_CID_VBLANK, V4L2_CID_HBLANK};
+        for (unsigned j = 0; j < 4; ++j)
+            if (!delay_override[j] && sensor_properties->delays[i].id == ids[j])
+                delays[j] = sensor_properties->delays[i].frames;
+    }
+    cc_camera_properties properties;
+    ret = cc_camera_get_properties(camera, &properties);
+    if (ret < 0)
+        goto done;
+    if (!(properties.flags & CC_CAMERA_PROPERTY_ACTIVE_AREA)) {
+        ret = -ENODATA;
+        goto done;
+    }
+    uint32_t width = properties.active_area.width, height = properties.active_area.height;
+    unsigned depth = !strcmp(profile->sensor_model, "imx477") ? 12U : 10U;
+    const uint32_t codes10[] = {MEDIA_BUS_FMT_SBGGR10_1X10, MEDIA_BUS_FMT_SGBRG10_1X10,
+                                MEDIA_BUS_FMT_SGRBG10_1X10, MEDIA_BUS_FMT_SRGGB10_1X10};
+    const uint32_t codes12[] = {MEDIA_BUS_FMT_SBGGR12_1X12, MEDIA_BUS_FMT_SGBRG12_1X12,
+                                MEDIA_BUS_FMT_SGRBG12_1X12, MEDIA_BUS_FMT_SRGGB12_1X12};
+    cc_sensor_mode_request mode_request = {.mbus_codes = depth == 12 ? codes12 : codes10, .num_mbus_codes = 4,
+        .width = width, .height = height, .max_width = width, .max_height = height};
     cc_sensor_format selected;
     ret = cc_camera_select_sensor_mode(camera, &mode_request, &selected);
     if (ret < 0)
@@ -327,8 +372,8 @@ int main(int argc, char **argv)
     if (ret < 0)
         goto done;
     pipeline.sensor = selected; /* Require the calibrated full-resolution mode. */
-    pipeline.streams[0].sensor_bit_depth = 10;
-    pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24, .width = 2592, .height = 1944};
+    pipeline.streams[0].sensor_bit_depth = depth;
+    pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24, .width = width, .height = height};
     pipeline.orientation = orientation;
     ret = cc_pipeline_configure(&planned_devices, &pipeline);
     if (ret < 0)
@@ -339,7 +384,7 @@ int main(int argc, char **argv)
     if (ret < 0)
         goto done;
     fprintf(stderr,"orientation=%u (EXIF), raw_fourcc=0x%08x\n",(unsigned)orientation,raw.fourcc);
-    if (raw.width != 2592 || raw.height != 1944) {
+    if (raw.width != width || raw.height != height) {
         ret = -EPROTO;
         goto done;
     }
@@ -391,8 +436,16 @@ int main(int argc, char **argv)
     if (ret < 0)
         goto done;
     if (!diagnostic) {
-        cc_sensor_mode_policy p = {
-            .hide_startup = 2, .hide_mode_switch = 2, .mistrust_startup = 2, .mistrust_mode_switch = 2};
+        cc_sensor_mode_policy p;
+        uint64_t duration;
+        ret = cc_sensor_frame_duration(&timing, &duration);
+        if (ret < 0)
+            goto done;
+        cc_sensor_mode_description mode = {.width = raw.width, .height = raw.height, .binning_x = 1,
+            .scale_x = 1, .min_frame_duration_ns = duration};
+        ret = cc_sensor_get_mode_policy(model, &mode, &p);
+        if (ret < 0)
+            goto done;
         ret = cc_capture_configure_sensor_policy(capture, &p);
         if (ret < 0)
             goto done;
@@ -410,7 +463,7 @@ int main(int argc, char **argv)
                 goto done;
             manual[mn++] = (cc_control){.id = V4L2_CID_EXPOSURE, .value = lines};
         }
-        if (gain)
+        if (gain_selected)
             manual[mn++] = (cc_control){.id = V4L2_CID_ANALOGUE_GAIN, .value = gain};
         ret = cc_request_set_sensor_controls(request, manual, mn);
         if (ret < 0)
@@ -448,7 +501,7 @@ int main(int argc, char **argv)
                 goto done;
         }
         cc_vc4_tuning baseline;
-        ret = cc_vc4_ov5647_build_tuning(&geometry, 4500, 1, &baseline);
+        ret = cc_vc4_build_tuning(tuning.profile, &geometry, 4500, 1, &baseline);
         if (!ret)
             ret = cc_request_set_vc4_tuning(request, &baseline);
         if (ret < 0)
@@ -554,7 +607,7 @@ int main(int argc, char **argv)
     }
     if (!ret)
         fprintf(stderr, "%s; %zu frames; profile=%s\n", diagnostic ? "Diagnostic complete" : output,
-                row_count, cc_vc4_ov5647_profile_id());
+                row_count, profile->calibration_id);
 done:
     if (capture) {
         uint64_t lost;
@@ -576,7 +629,7 @@ done:
         ret = -EIO;
     {
         int logged = metadata(meta, rows, row_count, traces, trace_count, trace_dropped, &raw,
-                              &config.output[0], &geometry, delays, diagnostic, ret, &timing, orientation);
+                              &config.output[0], &geometry, delays, diagnostic, ret, &timing, orientation, profile);
         if (!ret)
             ret = logged;
     }

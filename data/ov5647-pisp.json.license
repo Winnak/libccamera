@@ -1,0 +1,5 @@
+SPDX-FileCopyrightText: 2019-2026 Raspberry Pi Ltd
+SPDX-License-Identifier: BSD-2-Clause
+
+ov5647 PiSP calibration from archived libcamera 0.7.2.
+See LICENSES/BSD-2-Clause.txt.

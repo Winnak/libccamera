@@ -28,6 +28,36 @@ typedef struct cc_vc4_tuning {
     uint32_t lens_shading_enabled;
     double colour_temperature;
 } cc_vc4_tuning;
+/* AUTO selects the standard colour module for the sensor. Sensor identity
+ * cannot establish the lens or IR filter: select other variants explicitly. */
+enum cc_vc4_profile {
+    CC_VC4_PROFILE_AUTO = 0,
+    CC_VC4_PROFILE_OV5647, CC_VC4_PROFILE_OV5647_NOIR,
+    CC_VC4_PROFILE_IMX219, CC_VC4_PROFILE_IMX219_NOIR,
+    CC_VC4_PROFILE_IMX477, CC_VC4_PROFILE_IMX477_NOIR,
+    CC_VC4_PROFILE_IMX708, CC_VC4_PROFILE_IMX708_NOIR,
+    CC_VC4_PROFILE_IMX708_WIDE, CC_VC4_PROFILE_IMX708_WIDE_NOIR
+};
+enum cc_vc4_profile_flags {
+    CC_VC4_PROFILE_NOIR = 1U, CC_VC4_PROFILE_WIDE = 2U,
+    CC_VC4_PROFILE_GENERIC_LENS = 4U /* HQ: no calibration for a particular attached lens. */
+};
+typedef struct cc_vc4_profile_info {
+    enum cc_vc4_profile profile;
+    const char *name, *sensor_model, *calibration_id; /* Static borrowed strings. */
+    uint32_t flags;
+} cc_vc4_profile_info;
+/* AUTO/unknown IDs have no info. Lookup uses exact names (e.g. imx708_wide).
+ * These are software profiles, with no physical image-quality validation. */
+CC_API const cc_vc4_profile_info *cc_vc4_get_profile_info(enum cc_vc4_profile profile);
+CC_API int cc_vc4_lookup_profile(const char *name, enum cc_vc4_profile *profile);
+/* Rejects a sensor/override mismatch with -ENOTSUP; outputs unchanged on error. */
+CC_API int cc_vc4_select_profile(const cc_sensor_model *sensor, enum cc_vc4_profile override,
+                                 enum cc_vc4_profile *profile);
+/* No I/O. Requires a concrete profile, live geometry, 2000..13000 K, 1..64x.
+ * Outputs unchanged on error. Shading is calibration-only, without adaptive ALSC. */
+CC_API int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *geometry,
+                               double temperature, double analogue_gain, cc_vc4_tuning *tuning);
 /* Official standard-colour OV5647 calibration, not the NoIR variant.
  * Native black/gamma values are 16-bit-scale quantities, including 10-bit input.
  * No device I/O; output stays unchanged on error. */

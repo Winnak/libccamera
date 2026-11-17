@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later AND BSD-2-Clause */
 /* VC4 mappings/calibration adapted from Raspberry Pi Ltd's libcamera 0.7.2.
- * See data/ov5647-vc4.json and LICENSES/BSD-2-Clause.txt. */
+ * See the calibration JSON in data/ and LICENSES/BSD-2-Clause.txt. */
 #include "integer_math.h"
 #include "internal.h"
-#include "ov5647_profile.h"
+#include "vc4_profile.h"
 #include "subdev_compat.h"
 #include <ccamera/vc4_tuning.h>
 #include <errno.h>
@@ -12,7 +12,7 @@
 
 static double clamp(double x, double a, double b) { return x < a ? a : x > b ? b : x; }
 static int finite_value(double x) { return x >= -DBL_MAX && x <= DBL_MAX; }
-static int geometry_valid(const cc_sensor_geometry *g)
+int cc_sensor_geometry_valid(const cc_sensor_geometry *g)
 {
     return g && g->width && g->height && g->width <= 16384 && g->height <= 16384 && g->active.width &&
            g->active.height && g->active.x >= 0 && g->active.y >= 0 && g->crop.width && g->crop.height &&
@@ -66,7 +66,7 @@ int cc_camera_get_sensor_geometry(cc_camera *camera, cc_sensor_geometry *out)
         return -EPROTO;
     g.hflip = (uint32_t)flips[0].value;
     g.vflip = (uint32_t)flips[1].value;
-    if (!geometry_valid(&g))
+    if (!cc_sensor_geometry_valid(&g))
         return -EPROTO;
     *out = g;
     return 0;
@@ -93,14 +93,53 @@ static struct bcm2835_isp_rational rational(double x)
 {
     return (struct bcm2835_isp_rational){(int32_t)(x * 1000), 1000};
 }
-int cc_vc4_ov5647_build_tuning(const cc_sensor_geometry *g, double ct, double gain, cc_vc4_tuning *out)
+const cc_vc4_profile_info *cc_vc4_get_profile_info(enum cc_vc4_profile profile)
 {
-    if (!out || !geometry_valid(g) || !(ct >= 2000 && ct <= 13000) || !(gain >= 1 && gain <= 64))
+    const struct cc_vc4_profile_data *p = cc_vc4_profile_data(profile);
+    return p ? &p->info : NULL;
+}
+int cc_vc4_lookup_profile(const char *name, enum cc_vc4_profile *out)
+{
+    if (!name || !out)
+        return -EINVAL;
+    for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++i) {
+        const cc_vc4_profile_info *p = cc_vc4_get_profile_info((enum cc_vc4_profile)i);
+        if (p && !strcmp(name, p->name)) {
+            *out = p->profile;
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+int cc_vc4_select_profile(const cc_sensor_model *sensor, enum cc_vc4_profile override,
+                          enum cc_vc4_profile *out)
+{
+    if (!sensor || !out)
+        return -EINVAL;
+    const cc_sensor_properties *s = cc_sensor_get_properties(sensor);
+    if (!s)
+        return -EINVAL;
+    if (override != CC_VC4_PROFILE_AUTO) {
+        const cc_vc4_profile_info *p = cc_vc4_get_profile_info(override);
+        if (!p)
+            return -EINVAL;
+        if (strcmp(s->model, p->sensor_model))
+            return -ENOTSUP;
+        *out = override;
+        return 0;
+    }
+    return cc_vc4_lookup_profile(s->model, out) == 0 ? 0 : -ENOTSUP;
+}
+int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *g,
+                        double ct, double gain, cc_vc4_tuning *out)
+{
+    const struct cc_vc4_profile_data *p = cc_vc4_profile_data(profile);
+    if (!p || !out || !cc_sensor_geometry_valid(g) || !(ct >= 2000 && ct <= 13000) || !(gain >= 1 && gain <= 64))
         return -EINVAL;
     cc_vc4_tuning t = {0};
     t.colour_temperature = ct;
     t.black = (struct bcm2835_isp_black_level){
-        .enabled = 1, .black_level_r = 1024, .black_level_g = 1024, .black_level_b = 1024};
+        .enabled = 1, .black_level_r = p->black, .black_level_g = p->black, .black_level_b = p->black};
     t.gamma.enabled = 1;
     for (unsigned i = 0; i < 33; ++i) {
         unsigned x = i < 16   ? i * 1024
@@ -108,36 +147,40 @@ int cc_vc4_ov5647_build_tuning(const cc_sensor_geometry *g, double ct, double ga
                      : i < 32 ? (i - 24) * 4096 + 32768
                               : 65535;
         t.gamma.x[i] = (uint16_t)x;
-        t.gamma.y[i] = (uint16_t)clamp(pwl(ov_gamma, 66, x), 0, 65535);
+        t.gamma.y[i] = (uint16_t)clamp(pwl(p->gamma, 66, x), 0, 65535);
     }
     unsigned ci = 0;
-    while (ci < 4 && ct > ov_ccm[ci + 1][0])
+    while (ci + 2 < p->num_ccm && ct > p->ccm[ci + 1][0])
         ++ci;
-    double f = clamp((ct - ov_ccm[ci][0]) / (ov_ccm[ci + 1][0] - ov_ccm[ci][0]), 0, 1);
+    double f = clamp((ct - p->ccm[ci][0]) / (p->ccm[ci + 1][0] - p->ccm[ci][0]), 0, 1);
     t.ccm.enabled = 1;
     for (unsigned i = 0; i < 9; ++i)
-        t.ccm.ccm.ccm[i / 3][i % 3] = rational(ov_ccm[ci][i + 1] * (1 - f) + ov_ccm[ci + 1][i + 1] * f);
+        t.ccm.ccm.ccm[i / 3][i % 3] = rational(p->ccm[ci][i + 1] * (1 - f) + p->ccm[ci + 1][i + 1] * f);
     t.geq = (struct bcm2835_isp_geq){.enabled = 1,
-                                     .offset = (uint32_t)clamp(401 * gain, 0, 65535),
-                                     .slope = rational(clamp(0.05619 * gain, 0, 0.99999))};
+                                     .offset = (uint32_t)clamp(p->geq_offset * gain, 0, 65535),
+                                     .slope = rational(clamp(p->geq_slope * gain, 0, 0.99999))};
     /* Bounded Newton iteration avoids a mandatory libm dependency. */
     double root = gain;
     for (unsigned i = 0; i < 16; ++i)
         root = (root + gain / root) * 0.5;
     t.denoise = (struct bcm2835_isp_denoise){
-        .enabled = 1, .constant = 0, .slope = rational(4.25 * root * 3.2), .strength = rational(0.75)};
+        .enabled = 1, .constant = (uint32_t)(p->noise_constant * root * p->sdn_deviation),
+        .slope = rational(p->noise_slope * root * p->sdn_deviation), .strength = rational(p->sdn_strength)};
     t.cdn = (struct bcm2835_isp_cdn){1, CDN_MODE_HIGH_QUALITY};
     t.sharpen = (struct bcm2835_isp_sharpen){
-        .enabled = 1, .threshold = rational(0.75), .strength = rational(1), .limit = rational(0.5)};
+        .enabled = 1, .threshold = rational(p->sharpen_threshold),
+        .strength = rational(p->sharpen_strength), .limit = rational(p->sharpen_limit)};
     t.dpc = (struct bcm2835_isp_dpc){1, DPC_MODE_NORMAL};
-    unsigned li = ct > 5000 ? 1 : 0;
-    f = clamp((ct - ov_lsc_ct[li]) / (ov_lsc_ct[li + 1] - ov_lsc_ct[li]), 0, 1);
+    unsigned li = 0;
+    while (li + 2 < p->num_lsc && ct > p->lsc_ct[li + 1])
+        ++li;
+    f = clamp((ct - p->lsc_ct[li]) / (p->lsc_ct[li + 1] - p->lsc_ct[li]), 0, 1);
     double full[3][192];
     for (unsigned i = 0; i < 192; ++i) {
-        double lum = 1 + 0.5 * (ov_lsc_y[i] - 1);
-        full[0][i] = lum / (ov_lsc_r[li][i] * (1 - f) + ov_lsc_r[li + 1][i] * f);
+        double lum = 1 + p->luminance_strength * (p->lsc_y[i] - 1);
+        full[0][i] = lum / (p->lsc_r[li * 192 + i] * (1 - f) + p->lsc_r[(li + 1) * 192 + i] * f);
         full[1][i] = lum;
-        full[2][i] = lum / (ov_lsc_b[li][i] * (1 - f) + ov_lsc_b[li + 1][i] * f);
+        full[2][i] = lum / (p->lsc_b[li * 192 + i] * (1 - f) + p->lsc_b[(li + 1) * 192 + i] * f);
     }
     for (unsigned ch = 0; ch < 3; ++ch) {
         double minimum = DBL_MAX;
@@ -194,7 +237,14 @@ int cc_vc4_validate_tuning(const cc_vc4_tuning *t)
                 return -EINVAL;
     return 0;
 }
-const char *cc_vc4_ov5647_profile_id(void) { return CC_OV5647_PROFILE_ID; }
+int cc_vc4_ov5647_build_tuning(const cc_sensor_geometry *g, double ct, double gain, cc_vc4_tuning *out)
+{
+    return cc_vc4_build_tuning(CC_VC4_PROFILE_OV5647, g, ct, gain, out);
+}
+const char *cc_vc4_ov5647_profile_id(void)
+{
+    return cc_vc4_get_profile_info(CC_VC4_PROFILE_OV5647)->calibration_id;
+}
 int cc_sensor_flicker_exposure(const cc_sensor_model *model, const cc_sensor_timing *timing, uint64_t wanted,
                                uint32_t hz, uint64_t *out)
 {

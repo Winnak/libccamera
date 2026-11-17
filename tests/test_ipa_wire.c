@@ -39,6 +39,13 @@ static cc_ipa_wire *roundtrip(enum cc_ipa_wire_kind kind, const void *object)
 }
 static void pointer_inputs(void)
 {
+    cc_ipa_vc4_options vc4 = {.mains_hz = 60, .red_gain = 1.5, .blue_gain = 2,
+        .profile = CC_VC4_PROFILE_IMX708_WIDE_NOIR};
+    cc_ipa_wire *vc4_wire = roundtrip(CC_IPA_WIRE_VC4, &vc4);
+    const cc_ipa_vc4_options *vc4_copy = cc_ipa_wire_object(vc4_wire);
+    CHECK(vc4_copy->profile == vc4.profile && vc4_copy->mains_hz == 60 &&
+          vc4_copy->red_gain == 1.5 && vc4_copy->blue_gain == 2);
+    cc_ipa_wire_destroy(vc4_wire);
     const cc_sensor_model *sensor; OK(cc_sensor_lookup("imx708", &sensor));
     static const cc_control control = {123, -99, NULL, 0};
     static const cc_af_controls af = {.flags = CC_AF_SET_MODE, .mode = CC_AF_CONTINUOUS};
@@ -74,13 +81,15 @@ static void payloads(void)
     CHECK(decoded->isp_controls[0].data != payload && decoded->isp_controls[0].size == sizeof(payload));
     CHECK(!memcmp(decoded->isp_controls[0].data, payload, sizeof(payload)) && decoded->frontend.global.enables == 123);
     CHECK(decoded->backend.dirty_flags_rgb == 456 && decoded->vc4.lens_shading[2][191] == 7.5); cc_ipa_wire_destroy(wire);
+    struct pisp_fe_config frontend = {.awb_stats = {.size_x=24,.size_y=16,.offset_x=4,.offset_y=8}};
     const char stats[] = "native statistics bytes", embedded[] = "native embedded bytes";
     cc_control scalar = {.id = 123, .value = -88};
     cc_ipa_frame frame = {.sequence = 123, .cookie = 456, .timestamp_ns = UINT64_MAX, .statistics_data = stats,
         .statistics_size = sizeof(stats), .embedded_data = embedded, .embedded_size = sizeof(embedded),
         .isp_controls = &isp, .num_isp_controls = 1, .request_sensor_controls = &scalar, .num_request_sensor_controls = 1,
         .settings_sensor_controls = &scalar, .num_settings_sensor_controls = 1, .backend = &settings->backend,
-        .vc4 = &settings->vc4, .source_sequence = UINT32_MAX, .untrusted = 1};
+        .vc4 = &settings->vc4, .source_sequence = UINT32_MAX, .untrusted = 1,
+        .colour_temperature=6500,.frontend=&frontend};
     frame.sensor.count = 1; frame.sensor.controls[0] = scalar;
     wire = roundtrip(CC_IPA_WIRE_FRAME, &frame); const cc_ipa_frame *remote = cc_ipa_wire_object(wire);
     CHECK(remote->statistics_data != stats && remote->statistics_size == sizeof(stats) && !memcmp(remote->statistics_data, stats, sizeof(stats)));
@@ -89,6 +98,8 @@ static void payloads(void)
     CHECK(remote->request_sensor_controls[0].value == -88 && remote->settings_sensor_controls[0].value == -88);
     CHECK(remote->sensor.controls[0].value == -88 && remote->source_sequence == UINT32_MAX && remote->untrusted == 1);
     CHECK(remote->backend != frame.backend && remote->backend->dirty_flags_rgb == 456 && remote->vc4 != frame.vc4);
+    CHECK(remote->colour_temperature==6500 && remote->frontend!=&frontend &&
+        remote->frontend->awb_stats.size_x==24 && remote->frontend->awb_stats.offset_y==8);
     CHECK(remote->vc4->lens_shading[2][191] == 7.5); free(settings); cc_ipa_wire_destroy(wire);
 }
 static void limits(void)

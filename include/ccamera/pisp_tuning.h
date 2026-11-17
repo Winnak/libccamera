@@ -1,0 +1,29 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+#ifndef CCAMERA_PISP_TUNING_H
+#define CCAMERA_PISP_TUNING_H
+#include <ccamera/vc4_tuning.h>
+#include <ccamera/pisp_be.h>
+#include <ccamera/linux/pisp/pisp_fe_config.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* Module identifiers are shared with the existing VC4 API. Calibration data
+ * is pipeline-specific: PiSP never uses the VC4 tables. */
+typedef enum cc_vc4_profile cc_rpi_profile;
+typedef cc_vc4_profile_info cc_rpi_profile_info;
+CC_API const cc_rpi_profile_info *cc_pisp_get_profile_info(cc_rpi_profile profile);
+CC_API int cc_pisp_select_profile(const cc_sensor_model *sensor, cc_rpi_profile override,
+    cc_rpi_profile *profile);
+/* Static single-exposure photo processing, no history/HDR or device I/O.
+ * Live geometry is for the sensor image stream; CFE crop/downscale is excluded.
+ * Native blocks include stats-only FE black subtraction and BE black/colour/
+ * gamma/shading/denoise/sharpening. Red/blue gains are [0.5,4], gain [1,64],
+ * temperature [2000,13000]. Outputs are unchanged on error. The native builders
+ * finalize I/O, output CSC, tiles and register dirty bits. */
+CC_API int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *geometry,
+    double temperature, double analogue_gain, double red_gain, double blue_gain,
+    struct pisp_fe_config *frontend, struct pisp_be_config *backend);
+#ifdef __cplusplus
+}
+#endif
+#endif

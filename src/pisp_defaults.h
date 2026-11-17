@@ -1,0 +1,38 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/* Copyright (C) 2021-2023 Raspberry Pi Ltd. libpisp v1.5.0.
+ * Regenerate: python3 tools/generate_pisp_defaults.py
+ * Source SHA256: 701206ab955d9d097ef34f8af66fae877f91f3c198db5a6b8043581e84971007 */
+static const struct pisp_be_sharpen_config pisp_sharpen_base = {
+    .kernel0 = {-2,-2,-2,-2,-2,-1,-1,-1,-1,-1,6,6,6,6,6,-1,-1,-1,-1,-1,-2,-2,-2,-2,-2},
+    .threshold_offset0 = 100,
+    .threshold_slope0 = 614,
+    .scale0 = 512,
+    .kernel1 = {-2,-1,6,-1,-2,-2,-1,6,-1,-2,-2,-1,6,-1,-2,-2,-1,6,-1,-2,-2,-1,6,-1,-2},
+    .threshold_offset1 = 100,
+    .threshold_slope1 = 614,
+    .scale1 = 512,
+    .kernel2 = {2,-1,-2,0,0,-1,5,-1,-2,0,-2,-1,6,-1,-2,0,-2,-1,5,-1,0,0,-2,-1,2},
+    .threshold_offset2 = 100,
+    .threshold_slope2 = 614,
+    .scale2 = 921,
+    .kernel3 = {0,0,-2,-1,2,0,-2,-1,5,-1,-2,-1,6,-1,-2,-1,5,-1,-2,0,2,-1,-2,0,0},
+    .threshold_offset3 = 100,
+    .threshold_slope3 = 614,
+    .scale3 = 921,
+    .kernel4 = {-1,-2,-2,-2,-1,-2,2,2,2,-2,-2,2,12,2,-2,-2,2,2,2,-2,-1,-2,-2,-2,-1},
+    .threshold_offset4 = 200,
+    .threshold_slope4 = 552,
+    .scale4 = 512,
+    .positive_strength = 76,
+    .positive_pre_limit = 2000,
+    .positive_func = {512,1024,1536,2048,3072,4096,5120,6656,8192},
+    .positive_limit = 4000,
+    .negative_strength = 102,
+    .negative_pre_limit = 2000,
+    .negative_func = {512,716,1536,2048,3072,4096,5120,6656,8192},
+    .negative_limit = 4000,
+    .enables = 0x1f,
+    .white = 0,
+    .black = 0,
+    .grey = 50,
+};

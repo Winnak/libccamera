@@ -5,7 +5,7 @@
 - [C IPA modules and automatic controls](#c-ipa-modules-and-automatic-controls)
 - [Loading shared C modules](#loading-shared-c-modules)
 - [Discovering and selecting modules](#discovering-and-selecting-modules)
-- [OV5647 VC4 still profile](#ov5647-vc4-still-profile)
+- [VC4 still profiles](#vc4-still-profiles)
 - [Autofocus and lens control](#autofocus-and-lens-control)
 
 ## C IPA modules and automatic controls
@@ -215,16 +215,25 @@ environment text limit is 64 KiB. Exceeding search limits returns `-E2BIG` and
 cleans up the entire partial snapshot. Explicit argument-range errors return
 `-EINVAL`. No threads or background rescans are created.
 
-## OV5647 VC4 still profile
+## VC4 still profiles
 
-An opt-in OV5647/VC4 calibrated still controller and `ccamera-still` example now
+An opt-in VC4 calibrated still controller and `ccamera-still` example now
 provide black level, gamma, colour matrices, calibration-based lens shading,
-noise/sharpening controls, Bayesian AWB and single-channel AE with 50/60 Hz
+noise/sharpening controls, module-specific AWB and single-channel AE with 50/60 Hz
 anti-flicker. The tool waits for settled settings and saves a PPM with optional
 matching raw/statistics and diagnostic metadata. Two-frame OV5647 delays remain
 provisional. See the [Pi bring-up and validation guide](PI4_OV5647.md).
 Physical timing and image quality still require your Pi captures. The generic
-reference controller remains available. The C IPA ABI is now version 5.
+reference controller remains available. The C IPA ABI is now version 7.
+
+Ten profiles cover standard/NoIR OV5647, V2/IMX219, HQ/IMX477 and standard/wide
+V3/IMX708. `cc_ipa_vc4_options.profile` selects an explicit module override;
+AUTO assumes the standard-colour module for the configured sensor. NoIR uses
+trimmed grey-world AWB. See [coverage, selection and limitations](TUNING.md),
+including HQ lens calibration and V3 AF integration. The separate
+[`cc_ipa_pisp_create()` controller](TUNING.md#pi-5-cfepisp-photo-path) connects
+PiSP-specific calibration and AE/AWB to CFE/BE request graphs, including isolated
+workers. Native HDR/TDN policy and Pi 5 physical validation remain pending.
 
 ## Autofocus and lens control
 

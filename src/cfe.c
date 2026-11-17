@@ -44,6 +44,12 @@ static bool allocated(const cc_cfe *cfe)
     return false;
 }
 cc_camera *cc_cfe_source(cc_cfe *cfe) { return cfe && !cfe->fatal ? cfe->camera:NULL; }
+int cc_cfe_get_sensor_geometry(cc_cfe *cfe, cc_sensor_geometry *geometry)
+{
+    if (!cfe || !geometry) return -EINVAL;
+    if (cfe->fatal) return -ENODEV;
+    return cc_camera_get_sensor_geometry(cfe->camera,geometry);
+}
 int cc_cfe_configuration_ready(cc_cfe *cfe)
 {
     int ret=usable(cfe); return ret<0 ? ret:allocated(cfe) ? -EBUSY:0;

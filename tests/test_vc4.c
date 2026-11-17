@@ -81,6 +81,8 @@ struct fake {
     unsigned shading_start, shading_end, shading_controls;
     struct bcm2835_isp_lens_shading last_shading;
     struct bcm2835_isp_gamma last_gamma;
+    struct bcm2835_isp_black_level last_black;
+    struct bcm2835_isp_custom_ccm last_ccm;
     bool media_open, fail_stop, mismatch_input, bad_crop, selection_changes_layout, wrong_driver, pisp, bad_parameters;
     int missing_port, corrupt_port;
     int handles, mappings, next_fd, duplicates, fail_duplicate, map_calls, fail_map, starts;
@@ -94,6 +96,7 @@ struct fake {
     int32_t blue_gain, digital_gain;
     bool ipa_scene;
     bool timing_plan;
+    bool photo_profile;
     unsigned char payload[8];
     void *last_input;
     struct pisp_be_tiles_config last_parameters;
@@ -529,6 +532,9 @@ static int cfe_sensor_controls(struct fake *f, unsigned long req, void *arg)
             if (f->timing_plan) q->maximum=(int64_t)f->nodes[4].format.height+f->vblank-4;
             break;
         case V4L2_CID_ANALOGUE_GAIN: q->maximum=240; break;
+        case V4L2_CID_HFLIP: case V4L2_CID_VFLIP:
+            if (!f->photo_profile) return -EINVAL;
+            q->type=V4L2_CTRL_TYPE_BOOLEAN; q->maximum=1; q->flags=V4L2_CTRL_FLAG_READ_ONLY; break;
         case V4L2_CID_VBLANK: break;
         case V4L2_CID_HBLANK: q->flags=V4L2_CTRL_FLAG_READ_ONLY; break;
         case V4L2_CID_PIXEL_RATE:
@@ -545,6 +551,7 @@ static int cfe_sensor_controls(struct fake *f, unsigned long req, void *arg)
         struct v4l2_ext_control *v=&c->controls[i];
         int32_t *value;
         switch (v->id) {
+        case V4L2_CID_HFLIP: case V4L2_CID_VFLIP: CHECK(get && f->photo_profile); v->value=0; continue;
         case V4L2_CID_EXPOSURE: value=&f->exposure; break;
         case V4L2_CID_ANALOGUE_GAIN: value=&f->analogue_gain; break;
         case V4L2_CID_VBLANK: value=&f->vblank; break;
@@ -664,6 +671,7 @@ static void process_cfe(struct fake *f)
         CHECK(sum*2<=UINT32_MAX);
         s->awb.zones[0]=(struct pisp_awb_statistics_zone) {
             .counted=1000,.R_sum=(uint32_t)(sum/2),.G_sum=(uint32_t)sum,.B_sum=(uint32_t)(sum*2)};
+        if (f->photo_profile) for (unsigned z=1;z<1024;++z) s->awb.zones[z]=s->awb.zones[0];
         struct buffer *image_memory = memory_plane(f, 4, (int)i, 0);
         memset(image_memory->data,exposure,image->size);
         image->lens_setting=f->lens_position;
@@ -774,6 +782,8 @@ static int controls_ioctl(struct fake *f, int node, unsigned long req, void *arg
         if (f->shading_test && v->id>=V4L2_CID_USER_BCM2835_ISP_CC_MATRIX && v->id<=V4L2_CID_USER_BCM2835_ISP_CDN) {
             CHECK(req==VIDIOC_S_EXT_CTRLS);++f->shading_controls;
             if (v->id==V4L2_CID_USER_BCM2835_ISP_GAMMA) memcpy(&f->last_gamma,v->ptr,sizeof(f->last_gamma));
+            if (v->id==V4L2_CID_USER_BCM2835_ISP_BLACK_LEVEL) memcpy(&f->last_black,v->ptr,sizeof(f->last_black));
+            if (v->id==V4L2_CID_USER_BCM2835_ISP_CC_MATRIX) memcpy(&f->last_ccm,v->ptr,sizeof(f->last_ccm));
             if (v->id==V4L2_CID_USER_BCM2835_ISP_LENS_SHADING) {
                 memcpy(&f->last_shading,v->ptr,sizeof(f->last_shading));
                 if (f->last_shading.enabled) CHECK(f->shading_start==f->shading_end && f->shading_end && f->last_shading.dmabuf==19);
@@ -3262,6 +3272,56 @@ static void test_timing_graph(void)
     CHECK(cc_request_get_result(out)->status==CC_REQUEST_COMPLETE);
     OK(cc_capture_release(c,out)); cc_capture_close(c); OK(cc_request_destroy(request)); finished(&f);
 }
+static void test_photo_graph(void)
+{
+    for (unsigned compression=0;compression<4;++compression) for (unsigned noir=0;noir<2;++noir) {
+        struct fake f; init(&f); f.cfe=f.pisp=f.timing_plan=f.photo_profile=f.physical_array_larger=true;
+        f.exposure=20; f.compression=compression;
+        cc_capture *capture=pipeline_requests(&f); OK(cc_capture_configure_sensor_defaults(capture));
+        cc_sensor_geometry geometry; OK(cc_capture_get_sensor_geometry(capture,&geometry));
+        CHECK(geometry.width==128 && geometry.height==96 && geometry.crop.width==128);
+        cc_ipa_pisp_options options={.profile=noir ? CC_VC4_PROFILE_IMX219_NOIR : CC_VC4_PROFILE_IMX219,
+            .mains_hz=0,.red_gain=2,.blue_gain=0.5};
+        cc_ipa *ipa;
+        if (proxy_worker) {
+            cc_ipa_proxy_options proxy={.worker_path=proxy_worker};
+            OK(cc_ipa_pisp_create_proxy(&options,&proxy,&ipa));
+        } else OK(cc_ipa_pisp_create(&options,&ipa));
+        OK(cc_capture_set_ipa(capture,&ipa)); CHECK(!ipa);
+        cc_request *requests[3],*out;
+        for (unsigned i=0;i<3;++i) OK(cc_request_create(i+1,&requests[i]));
+        for (unsigned i=0;i<3;++i) OK(cc_capture_queue(capture,requests[i]));
+        f.delayed_port=2; ERROR(cc_capture_dequeue(capture,&out,2),ETIMEDOUT);
+        f.delayed_port=-1;
+        struct pisp_be_config held={0};
+        for (unsigned i=0;i<3;++i) {
+            OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==requests[i]);
+            const cc_capture_result *r=cc_request_get_result(out);
+            CHECK(r->status==CC_REQUEST_COMPLETE && !r->error && (r->ipa.flags&CC_IPA_METADATA_PISP));
+            CHECK(r->ipa.red_gain==2 && r->ipa.blue_gain==0.5 && r->ipa.colour_temperature>=2000);
+            const struct pisp_be_tiles_config *be=r->backend_parameters.planes[0].data;
+            const struct pisp_fe_config *fe=r->frontend_parameters.planes[0].data;
+            CHECK(be->config.global.rgb_enables&PISP_BE_RGB_ENABLE_GAMMA);
+            CHECK(be->config.global.rgb_enables&PISP_BE_RGB_ENABLE_CCM);
+            CHECK(be->config.global.bayer_enables&PISP_BE_BAYER_ENABLE_LSC);
+            CHECK(be->config.blc.black_level_r==4096 && fe->blc.black_level_r==4096);
+            CHECK(be->config.wbg.gain_r==4096 && be->config.wbg.gain_g==2048 && be->config.wbg.gain_b==1024);
+            if (!i) held=be->config; else OK(cc_capture_release(capture,out));
+            CHECK(!memcmp(&held,&((const struct pisp_be_tiles_config *)
+                cc_request_get_result(requests[0])->backend_parameters.planes[0].data)->config,sizeof(held)));
+        }
+        OK(cc_capture_release(capture,requests[0])); OK(cc_capture_stop(capture));
+        OK(cc_capture_queue(capture,requests[0])); OK(cc_capture_dequeue(capture,&out,0));
+        CHECK(cc_request_get_result(out)->ipa.flags&CC_IPA_METADATA_PISP); OK(cc_capture_release(capture,out));
+        OK(cc_capture_queue(capture,requests[0])); OK(cc_capture_queue(capture,requests[1]));
+        OK(cc_capture_stop(capture));
+        for (unsigned i=0;i<2;++i) {
+            OK(cc_capture_dequeue(capture,&out,0)); CHECK(cc_request_get_result(out)->status==CC_REQUEST_CANCELLED);
+            CHECK(!cc_request_get_result(out)->ipa.flags); OK(cc_capture_release(capture,out));
+        }
+        cc_capture_close(capture); for (unsigned i=0;i<3;++i) OK(cc_request_destroy(requests[i])); finished(&f);
+    }
+}
 static void test_shading_lifetime(void)
 {
     for (unsigned failure=0;failure<5;++failure) {
@@ -3296,16 +3356,22 @@ static void test_shading_lifetime(void)
 
 static void test_profile_request_snapshot(void)
 {
-    struct fake f;init(&f);f.shading_test=true;
-    cc_capture *capture=pipeline_requests(&f);
-    cc_sensor_geometry g={.active={0,0,128,96},.crop={0,0,128,96},.width=128,.height=96};
-    cc_vc4_tuning t;OK(cc_vc4_ov5647_build_tuning(&g,5000,1,&t));
-    cc_request *r,*out;OK(cc_request_create(8,&r));OK(cc_request_set_vc4_tuning(r,&t));
-    t.gamma.y[1]=4000;OK(cc_capture_queue(capture,r));ERROR(cc_request_set_vc4_tuning(r,&t),EBUSY);
-    OK(cc_capture_dequeue(capture,&out,0));CHECK(f.last_gamma.y[1]==5040);
-    OK(cc_capture_release(capture,out));OK(cc_request_set_vc4_tuning(r,&t));
-    OK(cc_capture_queue(capture,r));OK(cc_capture_dequeue(capture,&out,0));CHECK(f.last_gamma.y[1]==4000);
-    OK(cc_capture_release(capture,out));cc_capture_close(capture);OK(cc_request_destroy(r));finished(&f);
+    for (unsigned i=CC_VC4_PROFILE_OV5647;i<=CC_VC4_PROFILE_IMX708_WIDE_NOIR;++i) {
+        struct fake f;init(&f);f.shading_test=true;
+        cc_capture *capture=pipeline_requests(&f);
+        cc_sensor_geometry g={.active={0,0,128,96},.crop={0,0,128,96},.width=128,.height=96};
+        cc_vc4_tuning t;OK(cc_vc4_build_tuning((enum cc_vc4_profile)i,&g,5000,1,&t));
+        cc_vc4_tuning saved=t;
+        cc_request *r,*out;OK(cc_request_create(8,&r));OK(cc_request_set_vc4_tuning(r,&t));
+        t.gamma.y[1]=4000;OK(cc_capture_queue(capture,r));ERROR(cc_request_set_vc4_tuning(r,&t),EBUSY);
+        OK(cc_capture_dequeue(capture,&out,0));CHECK(f.last_gamma.y[1]==saved.gamma.y[1]);
+        CHECK(!memcmp(&f.last_black,&saved.black,sizeof(saved.black)));
+        CHECK(!memcmp(&f.last_ccm,&saved.ccm,sizeof(saved.ccm)));
+        CHECK(f.shading_map && f.shading_open);
+        OK(cc_capture_release(capture,out));OK(cc_request_set_vc4_tuning(r,&t));
+        OK(cc_capture_queue(capture,r));OK(cc_capture_dequeue(capture,&out,0));CHECK(f.last_gamma.y[1]==4000);
+        OK(cc_capture_release(capture,out));cc_capture_close(capture);OK(cc_request_destroy(r));finished(&f);
+    }
 }
 
 static void test_isp_try_configuration(void)
@@ -3491,6 +3557,12 @@ static void test_processed_roles(bool pisp)
 
 int main(int argc, char **argv)
 {
+    if ((argc==2 || argc==3) && !strcmp(argv[1],"photo")) {
+        if (argc==3) {
+            proxy_worker=argv[2]; int ret=proxy_available(); if (ret==77) return ret; OK(ret);
+        }
+        test_photo_graph(); return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "proxy-feedback")) {
         proxy_worker = argv[2]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
         test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_cfe_be_feedback(1); test_cfe_be_feedback(2);

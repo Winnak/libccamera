@@ -126,7 +126,7 @@ int cc_ipa_process(cc_ipa *ipa, const cc_ipa_frame *frame, cc_ipa_metadata *meta
     int ret = ipa->ops.process(ipa->context, frame, &result);
     if (ret) return ret < 0 ? ret : -EPROTO;
     if (result.flags & ~(uint32_t)(CC_IPA_METADATA_AE | CC_IPA_METADATA_AWB | CC_IPA_AE_CONVERGED |
-        CC_IPA_AWB_CONVERGED | CC_IPA_METADATA_AF | CC_IPA_METADATA_SENSOR | CC_IPA_METADATA_PDAF | CC_IPA_METADATA_HDR | CC_IPA_METADATA_VC4 | CC_IPA_EXPOSURE_LIMIT)) return -EPROTO;
+        CC_IPA_AWB_CONVERGED | CC_IPA_METADATA_AF | CC_IPA_METADATA_SENSOR | CC_IPA_METADATA_PDAF | CC_IPA_METADATA_HDR | CC_IPA_METADATA_VC4 | CC_IPA_EXPOSURE_LIMIT | CC_IPA_METADATA_PISP)) return -EPROTO;
     if (((result.flags & CC_IPA_AE_CONVERGED) && !(result.flags & CC_IPA_METADATA_AE)) ||
         ((result.flags & CC_IPA_AWB_CONVERGED) && !(result.flags & CC_IPA_METADATA_AWB))) return -EPROTO;
     if ((result.flags & CC_IPA_METADATA_AE) && (!result.exposure_ns || !(result.analogue_gain >= 1) ||
@@ -140,7 +140,7 @@ int cc_ipa_process(cc_ipa *ipa, const cc_ipa_frame *frame, cc_ipa_metadata *meta
         ((result.sensor_status.flags&CC_SENSOR_STATUS_TEMPERATURE) &&
          (result.sensor_status.temperature_c < -20 || result.sensor_status.temperature_c>80)))) return -EPROTO;
     if ((result.flags&CC_IPA_METADATA_HDR) && (!result.hdr.counted || result.hdr.average>=65536)) return -EPROTO;
-    if ((result.flags & CC_IPA_METADATA_VC4) && (!(result.colour_temperature>=2000 && result.colour_temperature<=13000) ||
+    if ((result.flags & (CC_IPA_METADATA_VC4 | CC_IPA_METADATA_PISP)) && (!(result.colour_temperature>=2000 && result.colour_temperature<=13000) ||
         !(result.lux>=0 && result.lux<=DBL_MAX) || !result.frame_duration_ns)) return -EPROTO;
     *metadata = result;
     return 0;

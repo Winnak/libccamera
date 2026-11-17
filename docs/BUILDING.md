@@ -8,7 +8,7 @@
 ## Build and test
 
 Building requires Linux, a C17 compiler, CMake 3.16 or newer, and installed Linux
-media/V4L2 UAPI headers. Python 3 is optional for one analysis test. On
+media/V4L2 UAPI headers. Python 3 is optional for analysis and calibration-data checks. On
 Ubuntu/Debian, install `build-essential cmake linux-libc-dev python3`.
 
 ```sh

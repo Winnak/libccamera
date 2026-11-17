@@ -28,7 +28,10 @@ geometry), sensor orientation negotiation/flip application, plus optional C IPA
 modules for exposure, white balance and autofocus, including explicit
 [shared C module loading](docs/IPA.md#loading-shared-c-modules) and
 [directory discovery/selection](docs/IPA.md#discovering-and-selecting-modules). An opt-in calibrated
-OV5647/VC4 still profile is available; broader tuning and advanced algorithms
+[VC4 still-profile family](docs/TUNING.md) covers OV5647, IMX219, IMX477 and IMX708,
+including explicit NoIR/wide variants. A separate calibrated
+[PiSP single-exposure path](docs/TUNING.md#pi-5-cfepisp-photo-path) covers the same
+modules on Pi 5 in software. Physical photo acceptance and advanced algorithms
 remain pending.
 
 Native [IPC transport](docs/IPC.md) provides reference-compatible datagram and
@@ -40,7 +43,7 @@ modules and selects in-process or isolated execution automatically.
 ## Build and test
 
 Requires Linux, a C17 compiler, CMake 3.16 or newer, and Linux media/V4L2 UAPI
-headers. Python 3 is optional for one analysis test. On Ubuntu/Debian, install
+headers. Python 3 is optional for analysis and calibration-data checks. On Ubuntu/Debian, install
 `build-essential cmake linux-libc-dev python3`.
 
 ```sh
@@ -79,7 +82,9 @@ Native CFE/VC4/PiSP configurations also support
 [read-only TRY validation](docs/CAPTURE.md#read-only-pipeline-validation) before
 applying formats or allocating buffers. The [stream-role layer](docs/CAPTURE.md#stream-roles)
 generates defaults, negotiates sensor/output formats and applies a complete plan
-to supplied devices; `ccamera-still` uses it for the OV5647 profile.
+to supplied devices; `ccamera-still` uses it for the supported VC4 profiles.
+Use `--list-profiles` to inspect them and `--profile NAME` to select a NoIR/wide
+module explicitly. Sensor identity alone cannot distinguish those variants.
 
 The public API starts at [ccamera/ccamera.h](include/ccamera/ccamera.h), with
 complete examples in [examples/](examples/). To use an installed library:
@@ -100,6 +105,7 @@ for installation, `CMAKE_PREFIX_PATH`, embedding the source and pkg-config.
 | [Capture and requests](docs/CAPTURE.md) | Discovery, controls, frame intervals, buffer ownership and request lifecycle |
 | [Sensor controls and metadata](docs/SENSORS.md) | Sensor profiles, gain/timing, delayed controls and embedded data |
 | [Algorithms and autofocus](docs/IPA.md) | C IPA modules, reference AE/AWB and lens control |
+| [Pi photo tuning](docs/TUNING.md) | VC4/PiSP module selection, calibration coverage and limitations |
 | [Pipeline processing](docs/PIPELINES.md) | Low-level queues, VC4 ISP, Pi 5 CFE and PiSP back end |
 | [Pi 4B / OV5647 stills](docs/PI4_OV5647.md) | Calibrated still capture, diagnostics and hardware validation |
 | [Fuzz testing](tests/fuzz/README.md) | Fuzzer targets, longer campaigns and reproducer handling |

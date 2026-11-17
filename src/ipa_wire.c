@@ -223,6 +223,7 @@ static void settings(struct codec *c, cc_ipa_settings *value)
     value->num_isp_controls = (uint32_t)count(c, value->num_isp_controls, CC_IPA_MAX_CONTROLS);
     controls(c, value->isp_controls, value->num_isp_controls);
     FIELD(value, frontend); FIELD(value, backend); af_status(c, &value->af); vc4_tuning(c, &value->vc4);
+    FIELD(value, colour_temperature);
 }
 static void statistics(struct codec *c, cc_ipa_statistics *value)
 {
@@ -246,6 +247,9 @@ static void frame(struct codec *c, cc_ipa_frame *value)
     cc_vc4_tuning *vc4 = optional(c, value->vc4, sizeof(*vc4)); value->vc4 = vc4;
     if (vc4) vc4_tuning(c, vc4);
     FIELD(value, source_sequence); FIELD(value, untrusted);
+    FIELD(value, colour_temperature);
+    struct pisp_fe_config *frontend = optional(c, value->frontend, sizeof(*frontend)); value->frontend = frontend;
+    if (frontend) BLOCK(frontend);
 }
 static void metadata(struct codec *c, cc_ipa_metadata *value)
 {
@@ -296,7 +300,9 @@ static void visit(struct codec *c, enum cc_ipa_wire_kind kind)
     case CC_IPA_WIRE_FRAME: frame(c, &value->frame); break;
     case CC_IPA_WIRE_METADATA: metadata(c, &value->metadata); break;
     case CC_IPA_WIRE_REFERENCE: reference(c, &value->reference); break;
-    case CC_IPA_WIRE_VC4: FIELD(&value->vc4, mains_hz); FIELD(&value->vc4, red_gain); FIELD(&value->vc4, blue_gain); break;
+    case CC_IPA_WIRE_VC4:
+        FIELD(&value->vc4, mains_hz); FIELD(&value->vc4, red_gain); FIELD(&value->vc4, blue_gain);
+        FIELD(&value->vc4, profile); break;
     }
     if (!c->error && !c->decode) memcpy(c->output + fd_count_offset, &c->owner->num_fds, sizeof(uint32_t));
     if (!c->error && c->decode) for (size_t i = 0; i < c->owner->num_fds; ++i)

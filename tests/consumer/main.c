@@ -25,6 +25,26 @@
 
 int main(int argc, char **argv)
 {
+    const cc_sensor_model *photo_sensor;
+    enum cc_vc4_profile photo_profile;
+    if (cc_sensor_lookup("imx708", &photo_sensor) ||
+        cc_vc4_lookup_profile("imx708_wide", &photo_profile) ||
+        cc_vc4_select_profile(photo_sensor, photo_profile, &photo_profile)) return 1;
+    const cc_vc4_profile_info *photo_info = cc_vc4_get_profile_info(photo_profile);
+    cc_sensor_geometry photo_geometry = {.active = {0, 0, 4608, 2592},
+        .crop = {0, 0, 4608, 2592}, .width = 4608, .height = 2592};
+    cc_vc4_tuning photo_tuning;
+    if (!photo_info || !(photo_info->flags & CC_VC4_PROFILE_WIDE) ||
+        cc_vc4_build_tuning(photo_profile, &photo_geometry, 4500, 1, &photo_tuning) ||
+        cc_vc4_validate_tuning(&photo_tuning) || photo_tuning.black.black_level_r != 4096) return 1;
+    struct pisp_fe_config photo_fe; struct pisp_be_config photo_be;
+    if (cc_pisp_select_profile(photo_sensor,photo_profile,&photo_profile) ||
+        !cc_pisp_get_profile_info(photo_profile) ||
+        cc_pisp_build_tuning(photo_profile,&photo_geometry,4500,1,1.5,2,&photo_fe,&photo_be) ||
+        photo_be.wbg.gain_r!=1536 || !(photo_be.global.rgb_enables&PISP_BE_RGB_ENABLE_GAMMA)) return 1;
+    cc_ipa *photo_ipa=NULL;
+    if (cc_ipa_pisp_create(NULL,&photo_ipa)) return 1;
+    cc_ipa_destroy(photo_ipa);
     if (argc == 2) {
         cc_ipa_proxy_options options = {.worker_path = argv[1]}; cc_ipa *installed_proxy = NULL;
         int ret = cc_ipa_vc4_create_proxy(NULL, &options, &installed_proxy);
@@ -231,7 +251,7 @@ int main(int argc, char **argv)
         cc_cfe_get_sensor_streams(NULL,&sensor_streams)!=-EINVAL ||
         cc_capture_get_sensor_streams(NULL,&sensor_streams)!=-EINVAL) return 1;
     cc_embedded_configuration embedded_configuration;
-    if (CC_IPA_ABI_VERSION!=5 || cc_camera_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
+    if (CC_IPA_ABI_VERSION!=7 || cc_camera_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
         cc_cfe_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
         cc_capture_get_embedded_configuration(NULL,&embedded_configuration)!=-EINVAL ||
         cc_camera_export_embedded_plane(NULL,0,0)!=-EINVAL) return 1;

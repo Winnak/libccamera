@@ -16,7 +16,10 @@ precedence over this overview.
   [BSD-3-Clause](BSD-3-Clause.txt) terms where indicated.
 - Build helpers and GitHub configuration explicitly marked `CC0-1.0` use
   [CC0 1.0](CC0-1.0.txt).
-- The OV5647 calibration data has a separate
-  [license notice](../data/ov5647-vc4.json.license), so the JSON remains unchanged.
+- Each vendored VC4/PiSP calibration JSON has an adjacent `.license` notice, for
+  example [OV5647](../data/ov5647-vc4.json.license). The JSON remains unchanged.
+  See [calibration provenance](../docs/TUNING.md#provenance-and-software-checks).
+- The native PiSP defaults retain the separate
+  [libpisp notice](../data/pisp-default.json.license).
 
 The external upstream reference archive is not distributed with this project.

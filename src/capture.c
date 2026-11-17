@@ -28,6 +28,7 @@ struct cc_request {
     struct pisp_be_config be;
     bool have_vc4;
     cc_vc4_tuning vc4;
+    double colour_temperature;
     cc_control *controls;
     int *control_fds; /* Owned native lens-shading descriptors, separate from mutable payloads. */
     size_t num_controls;
@@ -417,7 +418,8 @@ int cc_capture_get_sensor_geometry(cc_capture *c,cc_sensor_geometry *g)
 {
     if (!c || !g) return -EINVAL;
     if (c->dead) return -ENODEV;
-    return c->devices.camera ? cc_camera_get_sensor_geometry(c->devices.camera,g):-ENOTSUP;
+    return c->devices.frontend ? cc_cfe_get_sensor_geometry(c->devices.frontend,g) :
+        cc_camera_get_sensor_geometry(c->devices.camera,g);
 }
 int cc_capture_configure_sensor_policy(cc_capture *c,const cc_sensor_mode_policy *p)
 {
@@ -1114,6 +1116,7 @@ static int prepare_ipa(cc_capture *c, cc_request *r)
     const cc_vc4_tuning *vc4=r->have_vc4 ? &r->vc4:settings->flags & CC_IPA_VC4_TUNING ? &settings->vc4:NULL;
     if (!ret && vc4 && !c->devices.vc4) ret=-ENOTSUP;
     if (!ret) ret=cc_request_set_vc4_tuning(work,vc4);
+    if (!ret) work->colour_temperature = settings->colour_temperature;
     if (!ret && ((fe && !c->devices.frontend) || (be && !c->devices.backend) ||
                  (work->num_controls && !c->devices.vc4))) ret = -ENOTSUP;
     if (!ret && fe) { struct pisp_fe_config p; ret = cc_cfe_build_parameters(&c->fe, fe, &p); }
@@ -1138,6 +1141,11 @@ static int finish(cc_capture *c, cc_request *r)
             (stats->num_planes != 1 || !stats->planes[0].data || stats->planes[0].bytes_used < stats->planes[0].data_offset))
             return -EPROTO;
         cc_request *settings = effective(r);
+        struct pisp_fe_config frontend;
+        if (c->devices.frontend) {
+            int ret=cc_cfe_build_parameters(&c->fe,settings->have_fe ? &settings->fe : NULL,&frontend);
+            if (ret<0) return ret;
+        }
         cc_ipa_frame frame = {.sequence=r->result.sequence,.cookie=r->cookie,.sensor=r->result.sensor,
             .timestamp_ns=r->result.raw.timestamp_ns,
             .source_sequence=r->result.raw.sequence,.untrusted=r->result.untrusted,
@@ -1148,7 +1156,9 @@ static int finish(cc_capture *c, cc_request *r)
             .statistics_data=stats->num_planes ? (const unsigned char *)stats->planes[0].data + stats->planes[0].data_offset : NULL,
             .statistics_size=stats->num_planes ? stats->planes[0].bytes_used - stats->planes[0].data_offset : 0,
             .isp_controls=settings->controls,.num_isp_controls=settings->num_controls,
-            .backend=settings->have_be ? &settings->be : NULL,.af=settings->af_status};
+            .backend=settings->have_be ? &settings->be : NULL,.af=settings->af_status,
+            .colour_temperature=settings->colour_temperature,
+            .frontend=c->devices.frontend ? &frontend:NULL};
         cc_frame *embedded=&r->result.embedded;
         if (embedded->num_planes) {
             if (embedded->num_planes!=1 || !embedded->planes[0].data ||

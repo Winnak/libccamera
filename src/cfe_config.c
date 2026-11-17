@@ -195,7 +195,15 @@ int cc_cfe_build_parameters(const cc_cfe_configuration *configuration,
         height = c.stats_crop.height;
     }
     if (c.global.enables & PISP_FE_ENABLE_AGC_STATS) {
-        FINALIZE_GRID(agc_stats, PISP_AGC_STATS_SIZE, PISP_AGC_STATS_SIZE);
+        /* Zero-weight trailing zones need no image coverage. The reference
+         * uses 15x15 metering inside the 16x16 native grid. */
+        unsigned agc_columns=0, agc_rows=0;
+        for (unsigned y=0; y<16; ++y) for (unsigned x=0; x<16; ++x)
+            if ((c.agc_stats.weights[y*8+x/2] >> (4*(x&1U))) & 15U) {
+                if (x+1>agc_columns) agc_columns=x+1;
+                if (y+1>agc_rows) agc_rows=y+1;
+            }
+        FINALIZE_GRID(agc_stats, agc_columns ? agc_columns : 16, agc_rows ? agc_rows : 16);
         if ((c.agc_stats.row_offset_x | c.agc_stats.row_offset_y) & 1U ||
             2U * c.agc_stats.row_offset_x >= width || 2U * c.agc_stats.row_offset_y >= height)
             return -ERANGE;

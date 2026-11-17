@@ -4,6 +4,7 @@
 #include <ccamera/ccamera.h>
 #include <ccamera/stream.h>
 #include <ccamera/sensor.h>
+#include <ccamera/vc4_tuning.h>
 #include <ccamera/linux/pisp/pisp_fe_config.h>
 
 #ifdef __cplusplus
@@ -136,6 +137,7 @@ CC_API int cc_cfe_select_sensor_mode(cc_cfe *cfe, const cc_sensor_mode_request *
 CC_API int cc_cfe_select_rpi_sensor_mode(cc_cfe *cfe, const cc_rpi_sensor_mode_request *request,
                                          cc_sensor_format *format);
 CC_API int cc_cfe_get_sensor_timing(cc_cfe *cfe, cc_sensor_timing *timing);
+CC_API int cc_cfe_get_sensor_geometry(cc_cfe *cfe, cc_sensor_geometry *geometry);
 CC_API int cc_cfe_get_frame_interval(cc_cfe *cfe,cc_fraction *interval);
 CC_API int cc_cfe_set_frame_interval(cc_cfe *cfe,cc_fraction *interval);
 CC_API int cc_cfe_enum_sensor_frame_interval(cc_cfe *cfe,uint32_t mbus_code,uint32_t width,uint32_t height,

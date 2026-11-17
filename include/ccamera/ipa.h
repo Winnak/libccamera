@@ -7,12 +7,13 @@
 #include <ccamera/af.h>
 #include <ccamera/embedded.h>
 #include <ccamera/vc4_tuning.h>
+#include <ccamera/pisp_tuning.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define CC_IPA_ABI_VERSION 5U
+#define CC_IPA_ABI_VERSION 7U
 #define CC_IPA_MAX_CONTROLS 32U
 typedef struct cc_ipa cc_ipa;
 enum cc_ipa_pipeline { CC_IPA_VC4 = 1, CC_IPA_CFE, CC_IPA_PISP, CC_IPA_VIMC };
@@ -57,12 +58,13 @@ typedef struct cc_ipa_settings {
     struct pisp_be_config backend;
     cc_af_status af; /* Snapshot for this frame; LENS flag requests an actuator write. */
     cc_vc4_tuning vc4;
+    double colour_temperature; /* Applied processing snapshot, 0 when unspecified. */
 } cc_ipa_settings;
 enum cc_ipa_metadata_flags {
     CC_IPA_METADATA_AE = 1U, CC_IPA_METADATA_AWB = 2U,
     CC_IPA_AE_CONVERGED = 4U, CC_IPA_AWB_CONVERGED = 8U, CC_IPA_METADATA_AF = 16U,
     CC_IPA_METADATA_SENSOR = 32U, CC_IPA_METADATA_PDAF = 64U, CC_IPA_METADATA_HDR = 128U, CC_IPA_METADATA_VC4 = 256U,
-    CC_IPA_EXPOSURE_LIMIT = 512U
+    CC_IPA_EXPOSURE_LIMIT = 512U, CC_IPA_METADATA_PISP = 1024U
 };
 typedef struct cc_ipa_metadata {
     uint32_t flags;
@@ -92,6 +94,8 @@ typedef struct cc_ipa_frame {
     size_t num_request_sensor_controls, num_settings_sensor_controls;
     const cc_vc4_tuning *vc4; /* Applied snapshot. */
     uint32_t source_sequence, untrusted;
+    double colour_temperature; /* From the applied settings for this frame. */
+    const struct pisp_fe_config *frontend; /* Applied FE statistics geometry, if available. */
 } cc_ipa_frame;
 
 /* A native C module ABI. The library copies this table; callback code/context
@@ -157,15 +161,21 @@ typedef struct cc_ipa_reference_tuning {
  * Bayesian AWB, flicker/HDR policies and calibrated image tuning are pending. */
 CC_API int cc_ipa_reference_create(const cc_ipa_reference_tuning *tuning, cc_ipa **ipa);
 
-/* Calibrated OV5647/VC4 still controller. Defaults: AE+AWB, 50 Hz,
+/* Calibrated VC4 still controller. Defaults: AE+AWB, 50 Hz,
  * official normal exposure curve. Manual sensor request overrides win.
  * Manual WB (both gains >0) disables AWB. mains_hz is 0, 50 or 60.
  * Options are copied. NULL selects defaults. */
 typedef struct cc_ipa_vc4_options {
     uint32_t mains_hz;
     double red_gain, blue_gain;
+    enum cc_vc4_profile profile; /* AUTO (0): standard colour profile for configured sensor. */
 } cc_ipa_vc4_options;
 CC_API int cc_ipa_vc4_create(const cc_ipa_vc4_options *options, cc_ipa **ipa);
+/* Same module identifiers/options and manual precedence, with PiSP-specific
+ * calibration, native RPFS statistics and CFE/BE blocks. Requires a complete
+ * CFE/PiSP graph and live geometry; CFE crop/downscale is unsupported. */
+typedef cc_ipa_vc4_options cc_ipa_pisp_options;
+CC_API int cc_ipa_pisp_create(const cc_ipa_pisp_options *options, cc_ipa **ipa);
 
 #ifdef __cplusplus
 }

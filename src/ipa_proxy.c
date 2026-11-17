@@ -347,6 +347,15 @@ int cc_ipa_vc4_create_proxy(const cc_ipa_vc4_options *controller, const cc_ipa_p
     if (!ret) ret = create_proxy(controller ? CC_IPA_PROXY_VC4 : CC_IPA_PROXY_VC4_DEFAULT, NULL, data, size, options, -1, NULL, out);
     free(data); return ret;
 }
+int cc_ipa_pisp_create_proxy(const cc_ipa_pisp_options *controller, const cc_ipa_proxy_options *options, cc_ipa **out)
+{
+    if (!out) return -EINVAL;
+    *out = NULL; void *data = NULL; size_t size = 0; int ret = 0;
+    if (controller) ret = cc_ipa_wire_encode(CC_IPA_WIRE_VC4, controller, &data, &size);
+    if (!ret) ret = create_proxy(controller ? CC_IPA_PROXY_PISP : CC_IPA_PROXY_PISP_DEFAULT,
+        NULL, data, size, options, -1, NULL, out);
+    free(data); return ret;
+}
 static struct proxy *vimc_proxy(cc_ipa *ipa)
 {
     struct proxy *proxy = cc_ipa_context(ipa, configure);

@@ -1,0 +1,6 @@
+SPDX-FileCopyrightText: 2021-2023 Raspberry Pi Ltd
+SPDX-License-Identifier: BSD-2-Clause
+
+libpisp v1.5.0 src/libpisp/backend/backend_default_config.json
+https://github.com/raspberrypi/libpisp/blob/v1.5.0/src/libpisp/backend/backend_default_config.json
+See LICENSES/BSD-2-Clause.txt.
