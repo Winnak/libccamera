@@ -2,6 +2,7 @@
 #ifndef CCAMERA_VC4_PROFILE_H
 #define CCAMERA_VC4_PROFILE_H
 #include <ccamera/vc4_tuning.h>
+#include <ccamera/af.h>
 struct cc_vc4_prior { double lux; const double *pwl; size_t count; };
 struct cc_vc4_profile_data {
     cc_vc4_profile_info info;
@@ -25,6 +26,9 @@ struct cc_vc4_profile_data {
     size_t num_exposure, num_target;
     double base_ev, speed, constraint_target;
     double lux_shutter, lux_gain, lux_y, lux_reference;
+    const double *metering[3]; /* centre, spot, matrix, in native region order. */
+    double wb_modes[7][2]; /* auto, incandescent, tungsten, fluorescent, indoor, daylight, cloudy. */
+    const cc_af_tuning *af;
 };
 const struct cc_vc4_profile_data *cc_vc4_profile_data(enum cc_vc4_profile profile);
 const struct cc_vc4_profile_data *cc_pisp_profile_data(enum cc_vc4_profile profile);

@@ -251,7 +251,11 @@ int main(int argc, char **argv)
         cc_cfe_get_sensor_streams(NULL,&sensor_streams)!=-EINVAL ||
         cc_capture_get_sensor_streams(NULL,&sensor_streams)!=-EINVAL) return 1;
     cc_embedded_configuration embedded_configuration;
-    if (CC_IPA_ABI_VERSION!=7 || cc_camera_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
+    cc_photo_controls photo={.flags=CC_PHOTO_EV,.exposure_value=1}; cc_photo_capabilities photo_caps;
+    if (cc_photo_validate_controls(&photo) || cc_request_set_photo_controls(NULL,&photo)!=-EINVAL ||
+        cc_capture_get_photo_capabilities(NULL,&photo_caps)!=-EINVAL ||
+        cc_ipa_get_photo_capabilities(NULL,&photo_caps)!=-EINVAL) return 1;
+    if (CC_IPA_ABI_VERSION!=8 || cc_camera_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
         cc_cfe_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
         cc_capture_get_embedded_configuration(NULL,&embedded_configuration)!=-EINVAL ||
         cc_camera_export_embedded_plane(NULL,0,0)!=-EINVAL) return 1;

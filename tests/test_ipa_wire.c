@@ -171,8 +171,20 @@ int main(int argc, char **argv)
     metadata.hdr.histogram[127] = UINT32_MAX; metadata.hdr.counted = UINT64_MAX;
     cc_ipa_wire *wire = roundtrip(CC_IPA_WIRE_METADATA, &metadata); const cc_ipa_metadata *decoded = cc_ipa_wire_object(wire);
     CHECK(decoded->hdr.histogram[127] == UINT32_MAX && decoded->hdr.counted == UINT64_MAX); cc_ipa_wire_destroy(wire);
-    cc_ipa_vc4_options options = {.mains_hz = 50, .red_gain = 1.5, .blue_gain = 2.5};
+    cc_ipa_vc4_options options = {.mains_hz = 50, .red_gain = 1.5, .blue_gain = 2.5, .autofocus=1};
     wire = roundtrip(CC_IPA_WIRE_VC4, &options); const cc_ipa_vc4_options *vc4 = cc_ipa_wire_object(wire);
-    CHECK(vc4->mains_hz == 50 && vc4->red_gain == 1.5 && vc4->blue_gain == 2.5); cc_ipa_wire_destroy(wire);
+    CHECK(vc4->mains_hz == 50 && vc4->red_gain == 1.5 && vc4->blue_gain == 2.5 && vc4->autofocus==1); cc_ipa_wire_destroy(wire);
+    cc_photo_controls photo={.flags=CC_PHOTO_EV|CC_PHOTO_WB,.exposure_value=-1.5,
+        .white_balance=CC_PHOTO_WB_MANUAL,.red_gain=1.5,.blue_gain=2};
+    cc_ipa_request request={.photo=&photo}; wire=roundtrip(CC_IPA_WIRE_REQUEST,&request);
+    const cc_ipa_request *req=cc_ipa_wire_object(wire);
+    CHECK(req->photo!=&photo && req->photo->exposure_value==-1.5 && req->photo->blue_gain==2);
+    cc_ipa_wire_destroy(wire);
+    cc_photo_capabilities caps={.controls=CC_PHOTO_ALL,.profile=CC_VC4_PROFILE_IMX708_WIDE,.num_delays=1,
+        .focus={.num_map_points=2,.map={{0,420},{35,920}}},.delays={{V4L2_CID_EXPOSURE,2,0}}};
+    wire=roundtrip(CC_IPA_WIRE_PHOTO_CAPABILITIES,&caps);
+    const cc_photo_capabilities *cap=cc_ipa_wire_object(wire);
+    CHECK(cap->focus.map[1].dioptres==35 && cap->focus.map[1].code==920 && cap->delays[0].frames==2);
+    cc_ipa_wire_destroy(wire);
     puts("IPA wire deep-copy, pointer reconstruction, limits and malformed-input checks passed"); return 0;
 }

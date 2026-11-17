@@ -37,7 +37,8 @@ int cc_ipa_create(const cc_ipa_ops *ops, void *context, cc_ipa **out)
     if (!ops) return -EINVAL;
     if (ops->abi_version != CC_IPA_ABI_VERSION || ops->size != sizeof(*ops)) return -EPROTONOSUPPORT;
     if (!ops->configure || !ops->start || !ops->stop || !ops->prepare || !ops->process ||
-        ops->capabilities & ~(uint32_t)(CC_IPA_CAP_LENS|CC_IPA_CAP_SENSOR_TIMING|CC_IPA_CAP_SENSOR_GEOMETRY)) return -EINVAL;
+        ops->capabilities & ~(uint32_t)(CC_IPA_CAP_LENS|CC_IPA_CAP_SENSOR_TIMING|CC_IPA_CAP_SENSOR_GEOMETRY|CC_IPA_CAP_PHOTO) ||
+        ((ops->capabilities & CC_IPA_CAP_PHOTO) && !ops->photo_capabilities)) return -EINVAL;
     cc_ipa *ipa = calloc(1, sizeof(*ipa));
     if (!ipa) return -ENOMEM;
     ipa->ops = *ops; ipa->context = context; *out = ipa;
@@ -64,6 +65,34 @@ void *cc_ipa_context(cc_ipa *ipa, int (*configure)(void *, const cc_ipa_configur
     return ipa && ipa->ops.configure == configure ? ipa->context : NULL;
 }
 uint32_t cc_ipa_get_capabilities(const cc_ipa *ipa) { return ipa ? ipa->ops.capabilities:0; }
+static bool photo_range_valid(const cc_photo_range *r)
+{
+    return r->minimum>=-DBL_MAX && r->maximum<=DBL_MAX && r->minimum<=r->maximum &&
+        r->default_value>=-DBL_MAX && r->default_value<=DBL_MAX;
+}
+int cc_ipa_get_photo_capabilities(cc_ipa *ipa, cc_photo_capabilities *out)
+{
+    if (!ipa || !out) return -EINVAL;
+    if (!(ipa->ops.capabilities & CC_IPA_CAP_PHOTO)) return -ENOTSUP;
+    if (!ipa->configured) return -EPIPE;
+    cc_photo_capabilities caps={0};
+    int ret=ipa->ops.photo_capabilities(ipa->context,&caps);
+    if (ret) return ret<0 ? ret:-EPROTO;
+    if (caps.controls & ~CC_PHOTO_ALL || caps.flags & ~7U || caps.metering_modes & ~7U ||
+        caps.white_balance_modes & ~255U || caps.denoise_modes & ~3U || caps.num_delays>CC_SENSOR_MAX_CONTROLS ||
+        caps.defaults.flags & ~caps.controls ||
+        cc_photo_validate_controls(&caps.defaults)<0 || !caps.min_exposure_ns ||
+        caps.min_exposure_ns>caps.max_exposure_ns || !caps.min_frame_duration_ns ||
+        caps.min_frame_duration_ns>caps.max_frame_duration_ns) return -EPROTO;
+    const cc_photo_range *ranges[]={&caps.analogue_gain,&caps.colour_gain,&caps.exposure_value,
+        &caps.automatic_gain,&caps.brightness,&caps.contrast,&caps.saturation,&caps.sharpness};
+    for (unsigned i=0; i<sizeof(ranges)/sizeof(ranges[0]); ++i)
+        if (!photo_range_valid(ranges[i])) return -EPROTO;
+    for (unsigned i=0; i<7; ++i) if (!photo_range_valid(&caps.white_balance_temperature[i])) return -EPROTO;
+    if ((caps.flags & CC_PHOTO_CAP_AF) && (!(ipa->ops.capabilities & CC_IPA_CAP_LENS) ||
+        caps.focus.num_map_points<2 || caps.focus.num_map_points>CC_AF_MAX_MAP)) return -EPROTO;
+    *out=caps; return 0;
+}
 int cc_ipa_configure(cc_ipa *ipa, const cc_ipa_configuration *configuration)
 {
     if (!ipa || !configuration || configuration->num_sensor_controls > CC_IPA_MAX_CONTROLS) return -EINVAL;
@@ -100,6 +129,12 @@ int cc_ipa_prepare(cc_ipa *ipa, const cc_ipa_request *request, cc_ipa_settings *
     int ret = controls_valid(request->sensor_controls, request->num_sensor_controls, true);
     if (ret < 0) return ret;
     if (request->af && cc_af_validate_controls(request->af)<0) return -EINVAL;
+    if (request->af && !(ipa->ops.capabilities & CC_IPA_CAP_LENS)) return -ENOTSUP;
+    if (request->photo) {
+        if (!(ipa->ops.capabilities & CC_IPA_CAP_PHOTO)) return -ENOTSUP;
+        ret=cc_photo_validate_controls(request->photo);
+        if (ret<0) return ret;
+    }
     cc_ipa_settings result = {0};
     ret = ipa->ops.prepare(ipa->context, request, &result);
     if (ret) return ret < 0 ? ret : -EPROTO;
@@ -110,6 +145,8 @@ int cc_ipa_prepare(cc_ipa *ipa, const cc_ipa_request *request, cc_ipa_settings *
     if (controls_valid(result.sensor_controls, result.num_sensor_controls, true) < 0 ||
         controls_valid(result.isp_controls, result.num_isp_controls, false) < 0) return -EPROTO;
     if ((result.flags & CC_IPA_VC4_TUNING) && cc_vc4_validate_tuning(&result.vc4)<0) return -EPROTO;
+    if (result.photo.flags && (!(ipa->ops.capabilities & CC_IPA_CAP_PHOTO) ||
+        cc_photo_validate_controls(&result.photo)<0)) return -EPROTO;
     *settings = result;
     return 0;
 }
@@ -121,12 +158,14 @@ int cc_ipa_process(cc_ipa *ipa, const cc_ipa_frame *frame, cc_ipa_metadata *meta
     if (controls_valid(frame->isp_controls, frame->num_isp_controls, false) < 0 ||
         controls_valid(frame->request_sensor_controls,frame->num_request_sensor_controls,true)<0 ||
         controls_valid(frame->settings_sensor_controls,frame->num_settings_sensor_controls,true)<0 ||
-        (frame->vc4 && cc_vc4_validate_tuning(frame->vc4)<0)) return -EINVAL;
+        (frame->vc4 && cc_vc4_validate_tuning(frame->vc4)<0) ||
+        (frame->photo.flags && cc_photo_validate_controls(&frame->photo)<0) ||
+        (frame->photo_overrides & ~CC_PHOTO_ALL)) return -EINVAL;
     cc_ipa_metadata result = {0};
     int ret = ipa->ops.process(ipa->context, frame, &result);
     if (ret) return ret < 0 ? ret : -EPROTO;
     if (result.flags & ~(uint32_t)(CC_IPA_METADATA_AE | CC_IPA_METADATA_AWB | CC_IPA_AE_CONVERGED |
-        CC_IPA_AWB_CONVERGED | CC_IPA_METADATA_AF | CC_IPA_METADATA_SENSOR | CC_IPA_METADATA_PDAF | CC_IPA_METADATA_HDR | CC_IPA_METADATA_VC4 | CC_IPA_EXPOSURE_LIMIT | CC_IPA_METADATA_PISP)) return -EPROTO;
+        CC_IPA_AWB_CONVERGED | CC_IPA_METADATA_AF | CC_IPA_METADATA_SENSOR | CC_IPA_METADATA_PDAF | CC_IPA_METADATA_HDR | CC_IPA_METADATA_VC4 | CC_IPA_EXPOSURE_LIMIT | CC_IPA_METADATA_PISP | CC_IPA_METADATA_PHOTO)) return -EPROTO;
     if (((result.flags & CC_IPA_AE_CONVERGED) && !(result.flags & CC_IPA_METADATA_AE)) ||
         ((result.flags & CC_IPA_AWB_CONVERGED) && !(result.flags & CC_IPA_METADATA_AWB))) return -EPROTO;
     if ((result.flags & CC_IPA_METADATA_AE) && (!result.exposure_ns || !(result.analogue_gain >= 1) ||
@@ -134,6 +173,19 @@ int cc_ipa_process(cc_ipa *ipa, const cc_ipa_frame *frame, cc_ipa_metadata *meta
     if ((result.flags & CC_IPA_METADATA_AWB) && (!(result.red_gain > 0 && result.red_gain <= DBL_MAX) ||
         !(result.blue_gain > 0 && result.blue_gain <= DBL_MAX))) return -EPROTO;
     if ((result.flags & CC_IPA_METADATA_AF) && !af_valid(&result.af)) return -EPROTO;
+    if ((result.flags & CC_IPA_METADATA_PHOTO) && (!(ipa->ops.capabilities & CC_IPA_CAP_PHOTO) ||
+        result.photo.flags & ~CC_PHOTO_ALL || result.photo_status & ~127U ||
+        !result.photo.exposure_ns || !(result.photo.analogue_gain>=1 && result.photo.analogue_gain<=DBL_MAX))) return -EPROTO;
+    if (result.flags & CC_IPA_METADATA_PHOTO) {
+        cc_photo_controls policy=result.photo;
+        policy.flags &= ~(uint32_t)(CC_PHOTO_EXPOSURE|CC_PHOTO_GAIN|CC_PHOTO_WB);
+        if (cc_photo_validate_controls(&policy)<0 ||
+            ((result.photo.flags & CC_PHOTO_EXPOSURE) && (!(result.flags & CC_IPA_METADATA_AE) || result.photo.exposure_ns!=result.exposure_ns)) ||
+            ((result.photo.flags & CC_PHOTO_GAIN) && (!(result.flags & CC_IPA_METADATA_AE) || result.photo.analogue_gain!=result.analogue_gain)) ||
+            ((result.photo.flags & CC_PHOTO_WB) && (!(result.flags & CC_IPA_METADATA_AWB) ||
+                result.photo.white_balance<CC_PHOTO_WB_AUTO || result.photo.white_balance>CC_PHOTO_WB_MANUAL ||
+                result.photo.red_gain!=result.red_gain || result.photo.blue_gain!=result.blue_gain))) return -EPROTO;
+    }
     if ((result.flags&CC_IPA_METADATA_SENSOR) && (!result.sensor_status.line_length_pck || !result.sensor_status.frame_length_lines ||
         !(result.sensor_status.analogue_gain>=1 && result.sensor_status.analogue_gain<=DBL_MAX) ||
         result.sensor_status.flags&~CC_SENSOR_STATUS_TEMPERATURE ||

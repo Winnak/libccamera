@@ -2364,7 +2364,7 @@ static void test_ipa_graph_failures(void)
         uint32_t count; cc_capture *c=request_graph(&f,true,&count);
         struct ipa_probe probe={.fault=fault};
         cc_ipa_ops ops={CC_IPA_ABI_VERSION,sizeof(ops),ipa_probe_configure,ipa_probe_start,ipa_probe_stop,
-            ipa_probe_prepare,ipa_probe_process,ipa_probe_destroy,0};
+            ipa_probe_prepare,ipa_probe_process,ipa_probe_destroy,0,NULL};
         cc_ipa *ipa; OK(cc_ipa_create(&ops,&probe,&ipa));
         if (!fault) {
             ERROR(cc_capture_set_ipa(c,&ipa),EIO); CHECK(ipa && probe.configured==1 && !probe.destroyed);

@@ -8,12 +8,13 @@
 #include <ccamera/embedded.h>
 #include <ccamera/vc4_tuning.h>
 #include <ccamera/pisp_tuning.h>
+#include <ccamera/photo.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define CC_IPA_ABI_VERSION 7U
+#define CC_IPA_ABI_VERSION 8U
 #define CC_IPA_MAX_CONTROLS 32U
 typedef struct cc_ipa cc_ipa;
 enum cc_ipa_pipeline { CC_IPA_VC4 = 1, CC_IPA_CFE, CC_IPA_PISP, CC_IPA_VIMC };
@@ -48,6 +49,7 @@ typedef struct cc_ipa_request {
     size_t num_sensor_controls;
     const cc_af_controls *af; /* Optional request commands, borrowed for this call. */
     cc_sensor_timing_limits timing_limits; /* Refreshed live limits with SENSOR_TIMING. */
+    const cc_photo_controls *photo; /* Optional normalized per-request controls. */
 } cc_ipa_request;
 enum cc_ipa_settings_flags { CC_IPA_FRONTEND = 1U, CC_IPA_BACKEND = 2U, CC_IPA_LENS = 4U, CC_IPA_VC4_TUNING = 8U };
 typedef struct cc_ipa_settings {
@@ -59,12 +61,13 @@ typedef struct cc_ipa_settings {
     cc_af_status af; /* Snapshot for this frame; LENS flag requests an actuator write. */
     cc_vc4_tuning vc4;
     double colour_temperature; /* Applied processing snapshot, 0 when unspecified. */
+    cc_photo_controls photo; /* Resolved policy for this request, flags=0 if unsupported. */
 } cc_ipa_settings;
 enum cc_ipa_metadata_flags {
     CC_IPA_METADATA_AE = 1U, CC_IPA_METADATA_AWB = 2U,
     CC_IPA_AE_CONVERGED = 4U, CC_IPA_AWB_CONVERGED = 8U, CC_IPA_METADATA_AF = 16U,
     CC_IPA_METADATA_SENSOR = 32U, CC_IPA_METADATA_PDAF = 64U, CC_IPA_METADATA_HDR = 128U, CC_IPA_METADATA_VC4 = 256U,
-    CC_IPA_EXPOSURE_LIMIT = 512U, CC_IPA_METADATA_PISP = 1024U
+    CC_IPA_EXPOSURE_LIMIT = 512U, CC_IPA_METADATA_PISP = 1024U, CC_IPA_METADATA_PHOTO = 2048U
 };
 typedef struct cc_ipa_metadata {
     uint32_t flags;
@@ -75,6 +78,8 @@ typedef struct cc_ipa_metadata {
     cc_sensor_hdr_statistics hdr; /* Decoded raw sensor histogram, if HDR. */
     double colour_temperature, lux;
     uint64_t frame_duration_ns;
+    cc_photo_controls photo; /* Applied values; flags identify valid fields. */
+    uint32_t photo_status; /* Expected sensor values, trust/auto/override/limit flags. */
 } cc_ipa_metadata;
 typedef struct cc_ipa_frame {
     uint64_t sequence, cookie;
@@ -96,6 +101,8 @@ typedef struct cc_ipa_frame {
     uint32_t source_sequence, untrusted;
     double colour_temperature; /* From the applied settings for this frame. */
     const struct pisp_fe_config *frontend; /* Applied FE statistics geometry, if available. */
+    cc_photo_controls photo; /* Applied request policy from settings, never a later request. */
+    uint32_t photo_overrides; /* CC_PHOTO_* domains replaced by explicit native settings. */
 } cc_ipa_frame;
 
 /* A native C module ABI. The library copies this table; callback code/context
@@ -111,7 +118,8 @@ typedef struct cc_ipa_frame {
  * Other opaque payload bytes must not contain process-local pointers/handles.
  * Shared C modules use ipa_module.h. This is not the upstream C++ IPA ABI;
  * Isolated C adapters are declared in ipa_proxy.h. */
-enum cc_ipa_capabilities { CC_IPA_CAP_LENS=1U, CC_IPA_CAP_SENSOR_TIMING=2U, CC_IPA_CAP_SENSOR_GEOMETRY=4U };
+enum cc_ipa_capabilities { CC_IPA_CAP_LENS=1U, CC_IPA_CAP_SENSOR_TIMING=2U, CC_IPA_CAP_SENSOR_GEOMETRY=4U,
+    CC_IPA_CAP_PHOTO=8U };
 typedef struct cc_ipa_ops {
     uint32_t abi_version;
     size_t size;
@@ -122,10 +130,14 @@ typedef struct cc_ipa_ops {
     int (*process)(void *context, const cc_ipa_frame *frame, cc_ipa_metadata *metadata);
     void (*destroy)(void *context);
     uint32_t capabilities; /* Explicit opt-in to lens access or live timing limits. */
+    int (*photo_capabilities)(void *context, cc_photo_capabilities *capabilities); /* Required with CAP_PHOTO. */
 } cc_ipa_ops;
 CC_API int cc_ipa_create(const cc_ipa_ops *ops, void *context, cc_ipa **ipa);
 CC_API void cc_ipa_destroy(cc_ipa *ipa);
 CC_API uint32_t cc_ipa_get_capabilities(const cc_ipa *ipa);
+/* Configured-mode limits/defaults; output unchanged on failure. Unconfigured:
+ * -EPIPE; controller without CAP_PHOTO: -ENOTSUP. No device writes. */
+CC_API int cc_ipa_get_photo_capabilities(cc_ipa *ipa, cc_photo_capabilities *capabilities);
 CC_API int cc_ipa_configure(cc_ipa *ipa, const cc_ipa_configuration *configuration);
 CC_API int cc_ipa_start(cc_ipa *ipa);
 CC_API void cc_ipa_stop(cc_ipa *ipa);
@@ -169,6 +181,7 @@ typedef struct cc_ipa_vc4_options {
     uint32_t mains_hz;
     double red_gain, blue_gain;
     enum cc_vc4_profile profile; /* AUTO (0): standard colour profile for configured sensor. */
+    uint32_t autofocus; /* Opt-in calibrated IMX708 lens/PDAF/CDAF; 0 or 1. */
 } cc_ipa_vc4_options;
 CC_API int cc_ipa_vc4_create(const cc_ipa_vc4_options *options, cc_ipa **ipa);
 /* Same module identifiers/options and manual precedence, with PiSP-specific

@@ -97,6 +97,7 @@ struct fake {
     bool ipa_scene;
     bool timing_plan;
     bool photo_profile;
+    bool clamp_photo_wb;
     unsigned char payload[8];
     void *last_input;
     struct pisp_be_tiles_config last_parameters;
@@ -322,7 +323,7 @@ static int wait_fd(void *ctx, int fd, short events, int timeout)
     struct fake *f = ctx;
     CHECK(fd >= 20 && fd < 20+NODES && timeout > 0);
     CHECK(events == (fd == 20 || (f->pisp && (fd == 22 || fd == 32 || fd == 34)) || (f->cfe && fd==26) ? POLLOUT : POLLIN) ||
-          (fd==24 && f->event_subscribed && (events==POLLPRI || events==(POLLIN|POLLPRI))));
+          ((fd==24 || (f->unicam && fd==27)) && f->event_subscribed && (events==POLLPRI || events==(POLLIN|POLLPRI))));
     f->now += UINT64_C(1000000);
     ++f->wait_calls;
     return -EAGAIN;
@@ -345,7 +346,7 @@ static int wait_many(void *ctx, struct pollfd *fds, size_t count, int timeout)
         CHECK(fds[i].fd >= 20 && fds[i].fd < 20+NODES);
         CHECK(fds[i].events == (fds[i].fd == 20 || (f->pisp && (fds[i].fd == 22 || fds[i].fd == 32 || fds[i].fd == 34)) ||
               (f->cfe && fds[i].fd==26) ? POLLOUT : POLLIN) ||
-              (fds[i].fd == 24 && f->event_subscribed &&
+              ((fds[i].fd == 24 || (f->unicam && fds[i].fd==27)) && f->event_subscribed &&
                (fds[i].events == POLLPRI || fds[i].events == (POLLIN | POLLPRI))));
     }
     if (f->interrupt_waits > 0) { --f->interrupt_waits; return -EINTR; }
@@ -529,7 +530,7 @@ static int cfe_sensor_controls(struct fake *f, unsigned long req, void *arg)
         switch (q->id) {
         case V4L2_CID_EXPOSURE:
             q->minimum=1;
-            if (f->timing_plan) q->maximum=(int64_t)f->nodes[4].format.height+f->vblank-4;
+            if (f->timing_plan) q->maximum=(int64_t)f->nodes[f->unicam ? 7:4].format.height+f->vblank-4;
             break;
         case V4L2_CID_ANALOGUE_GAIN: q->maximum=240; break;
         case V4L2_CID_HFLIP: case V4L2_CID_VFLIP:
@@ -563,7 +564,7 @@ static int cfe_sensor_controls(struct fake *f, unsigned long req, void *arg)
         else {
             if (f->timing_plan) {
                 if (v->id==V4L2_CID_VBLANK) CHECK(c->count==1);
-                if (v->id==V4L2_CID_EXPOSURE && v->value>(int64_t)f->nodes[4].format.height+f->vblank-4)
+                if (v->id==V4L2_CID_EXPOSURE && v->value>(int64_t)f->nodes[f->unicam ? 7:4].format.height+f->vblank-4)
                     return -ERANGE;
             }
             *value=v->value;
@@ -794,7 +795,7 @@ static int controls_ioctl(struct fake *f, int node, unsigned long req, void *arg
             else memcpy(f->payload, v->ptr, 8);
         } else if (v->id == V4L2_CID_RED_BALANCE) {
             if (req == VIDIOC_G_EXT_CTRLS) v->value = f->gain;
-            else f->gain = v->value;
+            else f->gain = f->clamp_photo_wb ? 1750:v->value;
         } else if (v->id==V4L2_CID_BLUE_BALANCE) {
             if (req==VIDIOC_G_EXT_CTRLS) v->value=f->blue_gain; else f->blue_gain=v->value;
         } else if (v->id==V4L2_CID_DIGITAL_GAIN) {
@@ -1015,7 +1016,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
     CHECK(node >= 0 && node < NODES && f->nodes[node].open);
     struct node *n = &f->nodes[node];
     if (req == VIDIOC_SUBSCRIBE_EVENT || req == VIDIOC_UNSUBSCRIBE_EVENT || req == VIDIOC_DQEVENT) {
-        CHECK(node == 4 && (f->sensor_support || f->cfe));
+        CHECK((node == 4 && (f->sensor_support || f->cfe)) || (f->unicam && node==7));
         if (req == VIDIOC_DQEVENT) {
             if (!f->event_pending) return -EAGAIN;
             struct v4l2_event *event = arg;
@@ -1102,7 +1103,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
     }
     if (req == VIDIOC_STREAMON) {
         n->streaming = true; ++f->starts;
-        if (node == 4 && f->event_subscribed) {
+        if ((node == 4 || (f->unicam && node==7)) && f->event_subscribed) {
             f->event_frame = f->cfe ? f->cfe_frame : f->sensor_sequence; f->event_pending = true;
         }
         return 0;
@@ -1112,6 +1113,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         n->streaming = false;
         if (node == 4 && f->sensor_support) f->sensor_sequence = 0;
         if (node == 4 && f->cfe) { f->cfe_next_frame=0; f->event_pending=false; }
+        if (f->unicam && node==7) { f->sensor_sequence=0; f->event_pending=false; }
         for (uint32_t i = 0; i < n->count; ++i) n->buffers[i].queued = n->buffers[i].done = false;
         return 0;
     }
@@ -1149,7 +1151,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         if (node == 4)
             for (uint32_t i = 0; i < f->nodes[0].count; ++i)
                 if (f->nodes[0].buffers[i].queued) ++f->capture_overlap;
-        if (node == 4 && !f->cfe && n->streaming && f->event_subscribed) {
+        if (((node == 4 && !f->cfe) || (f->unicam && node==7)) && n->streaming && f->event_subscribed) {
             CHECK(!f->event_pending);
             f->event_frame = f->sensor_sequence; f->event_pending = true;
         }
@@ -1217,6 +1219,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         }
         v->sequence = 8;
         if (f->cfe && node>=4 && node<=6) v->sequence=f->cfe_frame;
+        if (f->unicam && node==7 && f->photo_profile) v->sequence=f->sensor_sequence++;
         if (f->embedded && node==8) v->sequence=b->sequence;
         if (node == 4 && f->sensor_support && !f->cfe) {
             v->sequence = f->sensor_sequence++;
@@ -3144,9 +3147,10 @@ static void test_af_graph(bool cfe)
     cc_capture_close(c); for (size_t i=0;i<3;++i) OK(cc_request_destroy(requests[i])); finished(&f);
 }
 
-static void test_embedded_af_graph(void)
+static void test_embedded_af_graph(bool calibrated)
 {
     struct fake f; init(&f); f.cfe=f.pisp=f.embedded=f.af_lens=f.flat_focus=true; f.focus_peak=4.3; f.exposure=20;
+    f.photo_profile=f.timing_plan=f.physical_array_larger=calibrated;
     cc_capture *capture=pipeline_requests(&f);
     const cc_sensor_model *sensor; OK(cc_sensor_lookup("imx708",&sensor));
     cc_embedded_configuration configuration; OK(cc_capture_get_embedded_configuration(capture,&configuration));
@@ -3154,9 +3158,20 @@ static void test_embedded_af_graph(void)
     cc_af_tuning af; cc_af_reference_tuning(&af);
     cc_ipa_reference_tuning tuning={.flags=CC_IPA_REFERENCE_AF,.af=&af,.target_luminance=0.18,
         .exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4};
-    cc_ipa *ipa; OK(create_reference(&tuning,&ipa)); OK(cc_capture_set_ipa(capture,&ipa));
+    cc_ipa *ipa;
+    if (calibrated) {
+        OK(cc_capture_configure_sensor_defaults(capture));
+        cc_ipa_pisp_options options={.autofocus=1,.red_gain=1,.blue_gain=1};
+        if (proxy_worker) { cc_ipa_proxy_options proxy={.worker_path=proxy_worker}; OK(cc_ipa_pisp_create_proxy(&options,&proxy,&ipa)); }
+        else OK(cc_ipa_pisp_create(&options,&ipa));
+    } else OK(create_reference(&tuning,&ipa));
+    OK(cc_capture_set_ipa(capture,&ipa));
     cc_request *requests[3],*out;
     for (size_t i=0;i<3;++i) OK(cc_request_create(100+i,&requests[i]));
+    if (calibrated) for (unsigned i=0; i<3; ++i) {
+        cc_photo_controls photo={.flags=CC_PHOTO_EXPOSURE|CC_PHOTO_GAIN,.exposure_ns=32000,.analogue_gain=1};
+        OK(cc_request_set_photo_controls(requests[i],&photo));
+    }
     cc_af_controls controls={.flags=CC_AF_SET_MODE|CC_AF_TRIGGER,.mode=CC_AF_AUTO};
     OK(cc_request_set_af_controls(requests[0],&controls));
     bool focused=false;
@@ -3182,7 +3197,14 @@ static void test_embedded_af_graph(void)
     controls=(cc_af_controls){.flags=CC_AF_SET_MODE|CC_AF_SET_LENS,.mode=CC_AF_MANUAL,.lens_position=9};
     OK(cc_request_set_af_controls(requests[1],&controls));
     f.delayed_port=8; OK(cc_capture_queue(capture,requests[1])); OK(cc_capture_dispatch(capture));
-    struct pollfd fds[16]; size_t count=16; OK(cc_capture_pollfds(capture,fds,&count)); CHECK(count==1 && fds[0].fd==28);
+    struct pollfd fds[16]; size_t count=16; OK(cc_capture_pollfds(capture,fds,&count));
+    CHECK(count==(calibrated ? 2U:1U));
+    bool embedded_fd=false;
+    for (size_t i=0; i<count; ++i) {
+        if (fds[i].fd==28) embedded_fd=true;
+        else CHECK(calibrated && fds[i].fd==24 && fds[i].events==POLLPRI);
+    }
+    CHECK(embedded_fd);
     ERROR(cc_capture_dequeue(capture,&out,2),ETIMEDOUT);
     CHECK(!memcmp(bytes,held->embedded.planes[0].data,sizeof(bytes)));
     f.delayed_port=-1; OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==requests[1]);
@@ -3272,6 +3294,53 @@ static void test_timing_graph(void)
     CHECK(cc_request_get_result(out)->status==CC_REQUEST_COMPLETE);
     OK(cc_capture_release(c,out)); cc_capture_close(c); OK(cc_request_destroy(request)); finished(&f);
 }
+static void test_vc4_photo_graph(void)
+{
+    struct fake f; init(&f);
+    f.cfe=f.unicam=f.photo_profile=f.physical_array_larger=f.shading_test=f.ipa_scene=f.timing_plan=true;
+    f.exposure=20;
+    const struct cc_io io={&ops,&f};
+    cc_camera_info info={.pipeline=CC_PIPELINE_RPI_UNICAM,.media_path="/dev/media1",.video_path="/dev/video7",.sensor_entity=1};
+    cc_capture_devices d={0}; OK(cc_camera_open_io(&info,&io,&d.camera));
+    cc_format raw=raw_format(); OK(cc_camera_configure(d.camera,&raw));
+    d.vc4=open_isp(&f); configure(d.vc4); uint32_t count=3;
+    OK(cc_camera_allocate_buffers(d.camera,&count)); count=3; OK(cc_vc4_isp_allocate_buffers(d.vc4,&count));
+    cc_capture *capture; OK(cc_capture_create(&d,&capture,&count)); OK(cc_capture_configure_sensor_defaults(capture));
+    cc_ipa *ipa; cc_ipa_vc4_options options={.red_gain=1,.blue_gain=1};
+    if (proxy_worker) {
+        cc_ipa_proxy_options proxy={.worker_path=proxy_worker}; OK(cc_ipa_vc4_create_proxy(&options,&proxy,&ipa));
+    } else OK(cc_ipa_vc4_create(&options,&ipa));
+    OK(cc_capture_set_ipa(capture,&ipa));
+    cc_photo_capabilities caps; OK(cc_capture_get_photo_capabilities(capture,&caps)); CHECK(caps.profile==CC_VC4_PROFILE_IMX219);
+    cc_control hblank={.id=V4L2_CID_HBLANK,.value=33}; size_t error_index=1;
+    ERROR(cc_capture_set_controls(capture,&hblank,1,&error_index),EBUSY); CHECK(error_index==0);
+    cc_request *request,*out; OK(cc_request_create(1,&request));
+    cc_photo_controls controls={.flags=CC_PHOTO_EXPOSURE|CC_PHOTO_GAIN|CC_PHOTO_WB|CC_PHOTO_BRIGHTNESS,
+        .exposure_ns=80000,.analogue_gain=2,.white_balance=CC_PHOTO_WB_MANUAL,.red_gain=1.5,.blue_gain=2,.brightness=0.2};
+    OK(cc_request_set_photo_controls(request,&controls)); controls.brightness=0;
+    for (unsigned i=0; i<3; ++i) {
+        OK(cc_capture_queue(capture,request)); OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==request);
+        const cc_capture_result *r=cc_request_get_result(out);
+        CHECK(r->status==CC_REQUEST_COMPLETE && (r->ipa.flags & CC_IPA_METADATA_PHOTO));
+        CHECK(r->ipa.exposure_ns==80000 && r->ipa.analogue_gain==2 && r->ipa.red_gain==1.5 && r->ipa.blue_gain==2);
+        CHECK(r->ipa.photo.brightness==0.2 && f.last_gamma.y[0]>13000);
+        CHECK(r->ipa.photo_status & CC_PHOTO_STATS_TRUSTED);
+        OK(cc_capture_release(capture,out));
+    }
+    /* Native override domains are explicitly marked, with actual WB reported. */
+    cc_control red={.id=V4L2_CID_RED_BALANCE,.value=1750}; OK(cc_request_set_isp_controls(request,&red,1));
+    OK(cc_capture_queue(capture,request)); OK(cc_capture_dequeue(capture,&out,0));
+    const cc_capture_result *r=cc_request_get_result(out);
+    CHECK((r->ipa.photo_status & CC_PHOTO_NATIVE_OVERRIDE) && r->ipa.red_gain==1.75 && !(r->ipa.photo.flags & CC_PHOTO_WB));
+    CHECK(r->ipa.photo.flags & CC_PHOTO_BRIGHTNESS);
+    OK(cc_capture_release(capture,out)); OK(cc_capture_stop(capture));
+    OK(cc_request_set_isp_controls(request,NULL,0)); OK(cc_capture_queue(capture,request));
+    OK(cc_capture_dequeue(capture,&out,0)); CHECK(cc_request_get_result(out)->ipa.photo.brightness==0.2);
+    OK(cc_capture_release(capture,out));
+    f.clamp_photo_wb=true; OK(cc_capture_queue(capture,request)); OK(cc_capture_dequeue(capture,&out,0));
+    r=cc_request_get_result(out); CHECK(r->ipa.red_gain==1.75 && !(r->ipa.flags & CC_IPA_AWB_CONVERGED));
+    OK(cc_capture_release(capture,out)); cc_capture_close(capture); OK(cc_request_destroy(request)); finished(&f);
+}
 static void test_photo_graph(void)
 {
     for (unsigned compression=0;compression<4;++compression) for (unsigned noir=0;noir<2;++noir) {
@@ -3282,15 +3351,27 @@ static void test_photo_graph(void)
         CHECK(geometry.width==128 && geometry.height==96 && geometry.crop.width==128);
         cc_ipa_pisp_options options={.profile=noir ? CC_VC4_PROFILE_IMX219_NOIR : CC_VC4_PROFILE_IMX219,
             .mains_hz=0,.red_gain=2,.blue_gain=0.5};
+        if (noir) {
+            cc_sensor_mode_policy custom={.mistrust_startup=64};
+            OK(cc_capture_configure_sensor_policy(capture,&custom));
+        }
         cc_ipa *ipa;
         if (proxy_worker) {
             cc_ipa_proxy_options proxy={.worker_path=proxy_worker};
             OK(cc_ipa_pisp_create_proxy(&options,&proxy,&ipa));
         } else OK(cc_ipa_pisp_create(&options,&ipa));
         OK(cc_capture_set_ipa(capture,&ipa)); CHECK(!ipa);
+        cc_photo_capabilities caps; OK(cc_capture_get_photo_capabilities(capture,&caps));
+        CHECK(caps.controls==CC_PHOTO_ALL && caps.policy.mistrust_startup==(noir ? 64U:1U));
         cc_request *requests[3],*out;
         for (unsigned i=0;i<3;++i) OK(cc_request_create(i+1,&requests[i]));
+        for (unsigned i=0;i<3;++i) {
+            cc_photo_controls controls={.flags=CC_PHOTO_EV|CC_PHOTO_SHARPNESS|CC_PHOTO_METERING,
+                .exposure_value=(double)i-1,.sharpness=(double)i,.metering=(enum cc_photo_metering)i};
+            OK(cc_request_set_photo_controls(requests[i],&controls));
+        }
         for (unsigned i=0;i<3;++i) OK(cc_capture_queue(capture,requests[i]));
+        ERROR(cc_request_set_photo_controls(requests[0],NULL),EBUSY);
         f.delayed_port=2; ERROR(cc_capture_dequeue(capture,&out,2),ETIMEDOUT);
         f.delayed_port=-1;
         struct pisp_be_config held={0};
@@ -3299,6 +3380,9 @@ static void test_photo_graph(void)
             const cc_capture_result *r=cc_request_get_result(out);
             CHECK(r->status==CC_REQUEST_COMPLETE && !r->error && (r->ipa.flags&CC_IPA_METADATA_PISP));
             CHECK(r->ipa.red_gain==2 && r->ipa.blue_gain==0.5 && r->ipa.colour_temperature>=2000);
+            CHECK((r->ipa.flags & CC_IPA_METADATA_PHOTO) && r->ipa.photo.exposure_value==(double)i-1 &&
+                r->ipa.photo.sharpness==(double)i && r->ipa.photo.metering==(enum cc_photo_metering)i);
+            CHECK(!!(r->ipa.photo_status & CC_PHOTO_STATS_TRUSTED)==!noir);
             const struct pisp_be_tiles_config *be=r->backend_parameters.planes[0].data;
             const struct pisp_fe_config *fe=r->frontend_parameters.planes[0].data;
             CHECK(be->config.global.rgb_enables&PISP_BE_RGB_ENABLE_GAMMA);
@@ -3557,6 +3641,10 @@ static void test_processed_roles(bool pisp)
 
 int main(int argc, char **argv)
 {
+    if ((argc==2 || argc==3) && !strcmp(argv[1],"vc4-photo")) {
+        if (argc==3) { proxy_worker=argv[2]; int ret=proxy_available(); if (ret==77) return ret; OK(ret); }
+        test_vc4_photo_graph(); return 0;
+    }
     if ((argc==2 || argc==3) && !strcmp(argv[1],"photo")) {
         if (argc==3) {
             proxy_worker=argv[2]; int ret=proxy_available(); if (ret==77) return ret; OK(ret);
@@ -3566,10 +3654,10 @@ int main(int argc, char **argv)
     if (argc == 3 && !strcmp(argv[1], "proxy-feedback")) {
         proxy_worker = argv[2]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
         test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_cfe_be_feedback(1); test_cfe_be_feedback(2);
-        test_af_graph(false); test_af_graph(true); test_embedded_af_graph(); test_timing_graph();
+        test_af_graph(false); test_af_graph(true); test_embedded_af_graph(false); test_embedded_af_graph(true); test_timing_graph();
         test_imported_feedback(false); test_imported_feedback(true);
         use_v2_topology = true;
-        test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_af_graph(false); test_af_graph(true); test_embedded_af_graph();
+        test_ipa_vc4_feedback(); test_cfe_be_feedback(0); test_af_graph(false); test_af_graph(true); test_embedded_af_graph(false); test_embedded_af_graph(true);
         puts("Isolated VC4/CFE/PiSP feedback, AF/PDAF, timing, imported results and restarts passed"); return 0;
     }
     if (argc == 4 && (!strcmp(argv[1], "auto-modules") || !strcmp(argv[1], "auto-manager"))) {
@@ -3621,10 +3709,10 @@ int main(int argc, char **argv)
     if (argc>1 && !strcmp(argv[1],"topology")) {
         use_v2_topology=true;
         test_processing(); test_be_processing(); test_pipeline_requests(false); test_pipeline_requests(true);
-        test_cfe_be_feedback(0); test_af_graph(false); test_af_graph(true); test_embedded_af_graph();
+        test_cfe_be_feedback(0); test_af_graph(false); test_af_graph(true); test_embedded_af_graph(false); test_embedded_af_graph(true);
         puts("VC4/PiSP/CFE native capture, processing, controls and embedded/PDAF graphs using full media-v2 topology passed"); return 0;
     }
-    if (argc>1 && !strcmp(argv[1],"embedded")) { test_embedded_af_graph(); puts("Timestamp-paired CFE/PiSP sensor reports and PDAF graph feedback passed"); return 0; }
+    if (argc>1 && !strcmp(argv[1],"embedded")) { test_embedded_af_graph(false); test_embedded_af_graph(true); puts("Timestamp-paired CFE/PiSP sensor reports and PDAF graph feedback passed"); return 0; }
     if (argc==2 && !strcmp(argv[1],"af")) {
         test_af_graph(false); test_af_graph(true);
         puts("VC4/CFE/PiSP AF feedback, lens association, combined 3A, snapshots, restart and failures passed"); return 0;

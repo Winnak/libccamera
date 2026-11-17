@@ -16,6 +16,7 @@ union wire_object {
     cc_ipa_metadata metadata;
     cc_ipa_reference_tuning reference;
     cc_ipa_vc4_options vc4;
+    cc_photo_capabilities photo_capabilities;
 };
 struct allocation { struct allocation *next; void *data; };
 struct cc_ipa_wire {
@@ -207,6 +208,37 @@ static void configuration(struct codec *c, cc_ipa_configuration *value)
     control_info(c, &value->digital_gain); control_info(c, &value->lens);
     FIELD(value, embedded); timing_limits(c, &value->timing_limits); FIELD(value, geometry);
 }
+static void photo_controls(struct codec *c, cc_photo_controls *value)
+{
+    FIELD(value, flags); FIELD(value, exposure_ns); FIELD(value, analogue_gain); FIELD(value, exposure_value);
+    FIELD(value, metering); FIELD(value, white_balance); FIELD(value, red_gain); FIELD(value, blue_gain);
+    FIELD(value, brightness); FIELD(value, contrast); FIELD(value, saturation); FIELD(value, sharpness);
+    FIELD(value, denoise); FIELD(value, mains_hz); FIELD(value, min_frame_duration_ns); FIELD(value, max_frame_duration_ns);
+}
+static void photo_range(struct codec *c, cc_photo_range *value)
+{
+    FIELD(value, minimum); FIELD(value, maximum); FIELD(value, default_value);
+}
+static void photo_capabilities(struct codec *c, cc_photo_capabilities *value)
+{
+    FIELD(value, controls); FIELD(value, flags); FIELD(value, metering_modes); FIELD(value, white_balance_modes);
+    FIELD(value, denoise_modes); FIELD(value, profile); photo_controls(c,&value->defaults);
+    FIELD(value, min_exposure_ns); FIELD(value, max_exposure_ns);
+    FIELD(value, min_auto_exposure_ns); FIELD(value, max_auto_exposure_ns);
+    FIELD(value, min_frame_duration_ns); FIELD(value, max_frame_duration_ns);
+    photo_range(c,&value->analogue_gain); photo_range(c,&value->colour_gain); photo_range(c,&value->exposure_value);
+    photo_range(c,&value->automatic_gain);
+    for (unsigned i=0; i<7; ++i) photo_range(c,&value->white_balance_temperature[i]);
+    photo_range(c,&value->brightness); photo_range(c,&value->contrast); photo_range(c,&value->saturation);
+    photo_range(c,&value->sharpness); control_info(c,&value->native_gain); timing_limits(c,&value->timing);
+    FIELD(&value->policy, sensitivity); FIELD(&value->policy, hide_startup); FIELD(&value->policy, hide_mode_switch);
+    FIELD(&value->policy, mistrust_startup); FIELD(&value->policy, mistrust_mode_switch); FIELD(&value->policy, min_debin_factor);
+    value->num_delays=(uint32_t)count(c,value->num_delays,CC_SENSOR_MAX_CONTROLS);
+    for (unsigned i=0; i<value->num_delays && !c->error; ++i) {
+        FIELD(&value->delays[i], id); FIELD(&value->delays[i], frames); FIELD(&value->delays[i], flags);
+    }
+    control_info(c,&value->lens); af_tuning(c,&value->focus);
+}
 static void request(struct codec *c, cc_ipa_request *value)
 {
     FIELD(value, sequence); FIELD(value, cookie); timing(c, &value->timing);
@@ -214,6 +246,8 @@ static void request(struct codec *c, cc_ipa_request *value)
     cc_af_controls *af = optional(c, value->af, sizeof(*af)); value->af = af;
     if (af) af_controls(c, af);
     timing_limits(c, &value->timing_limits);
+    cc_photo_controls *photo=optional(c,value->photo,sizeof(*photo)); value->photo=photo;
+    if (photo) photo_controls(c,photo);
 }
 static void settings(struct codec *c, cc_ipa_settings *value)
 {
@@ -224,6 +258,7 @@ static void settings(struct codec *c, cc_ipa_settings *value)
     controls(c, value->isp_controls, value->num_isp_controls);
     FIELD(value, frontend); FIELD(value, backend); af_status(c, &value->af); vc4_tuning(c, &value->vc4);
     FIELD(value, colour_temperature);
+    photo_controls(c,&value->photo);
 }
 static void statistics(struct codec *c, cc_ipa_statistics *value)
 {
@@ -250,6 +285,7 @@ static void frame(struct codec *c, cc_ipa_frame *value)
     FIELD(value, colour_temperature);
     struct pisp_fe_config *frontend = optional(c, value->frontend, sizeof(*frontend)); value->frontend = frontend;
     if (frontend) BLOCK(frontend);
+    photo_controls(c,&value->photo); FIELD(value, photo_overrides);
 }
 static void metadata(struct codec *c, cc_ipa_metadata *value)
 {
@@ -260,6 +296,7 @@ static void metadata(struct codec *c, cc_ipa_metadata *value)
     FIELD(status, line_length_pck); FIELD(status, frame_length_lines); FIELD(status, analogue_gain); FIELD(status, temperature_c);
     FIELD(&value->hdr, histogram); FIELD(&value->hdr, counted); FIELD(&value->hdr, average);
     FIELD(value, colour_temperature); FIELD(value, lux); FIELD(value, frame_duration_ns);
+    photo_controls(c,&value->photo); FIELD(value, photo_status);
 }
 static void reference(struct codec *c, cc_ipa_reference_tuning *value)
 {
@@ -279,6 +316,7 @@ static size_t object_size(enum cc_ipa_wire_kind kind)
     case CC_IPA_WIRE_METADATA: return sizeof(cc_ipa_metadata);
     case CC_IPA_WIRE_REFERENCE: return sizeof(cc_ipa_reference_tuning);
     case CC_IPA_WIRE_VC4: return sizeof(cc_ipa_vc4_options);
+    case CC_IPA_WIRE_PHOTO_CAPABILITIES: return sizeof(cc_photo_capabilities);
     default: return 0;
     }
 }
@@ -302,7 +340,8 @@ static void visit(struct codec *c, enum cc_ipa_wire_kind kind)
     case CC_IPA_WIRE_REFERENCE: reference(c, &value->reference); break;
     case CC_IPA_WIRE_VC4:
         FIELD(&value->vc4, mains_hz); FIELD(&value->vc4, red_gain); FIELD(&value->vc4, blue_gain);
-        FIELD(&value->vc4, profile); break;
+        FIELD(&value->vc4, profile); FIELD(&value->vc4, autofocus); break;
+    case CC_IPA_WIRE_PHOTO_CAPABILITIES: photo_capabilities(c,&value->photo_capabilities); break;
     }
     if (!c->error && !c->decode) memcpy(c->output + fd_count_offset, &c->owner->num_fds, sizeof(uint32_t));
     if (!c->error && c->decode) for (size_t i = 0; i < c->owner->num_fds; ++i)

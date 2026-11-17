@@ -43,7 +43,7 @@ if(NOT CCAMERA_DLOPEN_IN_LIBC)
 endif()
 set(CCAMERA_SOURCES
     src/io.c src/media.c src/media_topology.c src/controls.c src/stream.c src/bayer.c src/orientation.c src/camera.c src/configuration.c src/camera_properties.c src/camera_id.c src/sensor_mode.c src/vimc.c src/uvc.c src/discovery.c src/monitor.c src/monitor_native.c src/capture.c src/request_buffers.c src/fence.c src/delayed_controls.c src/sensor.c src/sensor_timing.c
-    src/ipa.c src/ipa_module.c src/ipa_module_elf.c src/ipa_manager.c src/ipa_proxy.c src/ipa_vimc.c src/source_paths.c src/ipc.c src/ipc_pipe.c src/process.c src/ipa_wire.c src/ipa_message.c src/ipa_statistics.c src/ipa_reference.c src/af.c src/embedded.c src/embedded_capture.c src/sensor_streams.c src/frame_interval.c
+    src/ipa.c src/photo.c src/photo_processing.c src/ipa_module.c src/ipa_module_elf.c src/ipa_manager.c src/ipa_proxy.c src/ipa_vimc.c src/source_paths.c src/ipc.c src/ipc_pipe.c src/process.c src/ipa_wire.c src/ipa_message.c src/ipa_statistics.c src/ipa_reference.c src/af.c src/embedded.c src/embedded_capture.c src/sensor_streams.c src/frame_interval.c
     src/vc4_tuning.c src/vc4_profiles.c src/pisp_tuning.c src/pisp_profiles.c src/ipa_vc4.c src/vc4_isp.c src/cfe.c src/cfe_config.c src/pisp_format.c src/pisp_processing.c
     src/pisp_resize.c src/pisp_tiling.c src/pisp_be_config.c src/pisp_be.c)
 
@@ -159,6 +159,9 @@ if(CCAMERA_BUILD_TESTS)
     add_test(NAME acquire-fences COMMAND ccamera-vc4-test fences)
     add_test(NAME vc4-ipa-feedback COMMAND ccamera-vc4-test ipa)
     add_test(NAME cfe-pisp-feedback COMMAND ccamera-vc4-test cfe-be)
+    add_test(NAME vc4-photo-graphs COMMAND ccamera-vc4-test vc4-photo)
+    add_test(NAME ipa-proxy-vc4-photo-graphs COMMAND ccamera-vc4-test vc4-photo $<TARGET_FILE:ccamera-ipa-worker>)
+    set_tests_properties(ipa-proxy-vc4-photo-graphs PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
     add_test(NAME pisp-photo-graphs COMMAND ccamera-vc4-test photo)
     add_test(NAME ipa-proxy-pisp-photo-graphs COMMAND ccamera-vc4-test photo $<TARGET_FILE:ccamera-ipa-worker>)
     set_tests_properties(ipa-proxy-pisp-photo-graphs PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
@@ -220,6 +223,13 @@ if(CCAMERA_BUILD_TESTS)
     ccamera_compile_settings(ccamera-pisp-processing-test)
     target_link_libraries(ccamera-pisp-processing-test PRIVATE ccamera::ccamera)
     add_test(NAME pisp-processing COMMAND ccamera-pisp-processing-test)
+    add_executable(ccamera-photo-test tests/test_photo.c)
+    ccamera_compile_settings(ccamera-photo-test)
+    target_link_libraries(ccamera-photo-test PRIVATE ccamera::ccamera)
+    add_dependencies(ccamera-photo-test ccamera-ipa-worker)
+    add_test(NAME photographic-controls COMMAND ccamera-photo-test)
+    add_test(NAME ipa-proxy-photographic-controls COMMAND ccamera-photo-test $<TARGET_FILE:ccamera-ipa-worker>)
+    set_tests_properties(ipa-proxy-photographic-controls PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
     add_executable(ccamera-vc4-tuning-test tests/test_vc4_tuning.c)
     ccamera_compile_settings(ccamera-vc4-tuning-test)
     target_link_libraries(ccamera-vc4-tuning-test PRIVATE ccamera::ccamera)

@@ -215,7 +215,7 @@ int cc_vc4_validate_tuning(const cc_vc4_tuning *t)
         t->dpc.strength > DPC_MODE_STRONG || !finite_value(t->colour_temperature))
         return -EINVAL;
     if (t->gamma.enabled &&
-        (t->gamma.x[0] || t->gamma.y[0] || t->gamma.x[32] != 65535 || t->gamma.y[32] != 65535))
+        (t->gamma.x[0] || t->gamma.x[32] != 65535))
         return -EINVAL;
     for (unsigned i = 1; i < 33 && t->gamma.enabled; ++i)
         if (t->gamma.x[i] <= t->gamma.x[i - 1] || t->gamma.y[i] < t->gamma.y[i - 1])

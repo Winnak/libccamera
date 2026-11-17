@@ -69,6 +69,10 @@ def generate(pipeline="vc4"):
         awb = a["rpi.awb"]
         bayes = awb.get("bayes", 1)
         if bayes:
+            modes = [awb["modes"][m] for m in
+                     ("auto", "incandescent", "tungsten", "fluorescent", "indoor", "daylight", "cloudy")]
+            fields["wb_modes"] = "{" + ", ".join("{%s,%s}" % (m["lo"], m["hi"]) for m in modes) + "}"
+        if bayes:
             curve = awb["ct_curve"]
             assert len(curve) % 3 == 0 and len(curve) >= 6
             fields["ct"] = array("ct", [curve[i:i+3] for i in range(0, len(curve), 3)])
@@ -88,6 +92,26 @@ def generate(pipeline="vc4"):
         assert constraint["y_target"][1] == constraint["y_target"][3]
         assert len(normal["shutter"]) == len(normal["gain"])
         assert len(agc["metering_modes"]["centre-weighted"]["weights"]) == (225 if pisp else 15)
+        meters = [array("meter_" + m.replace("-", "_"), agc["metering_modes"][m]["weights"])
+                  for m in ("centre-weighted", "spot", "matrix")]
+        fields["metering"] = "{" + ", ".join(meters) + "}"
+        if "rpi.af" in a:
+            af = a["rpi.af"]
+            ranges = [af["ranges"][m] for m in ("normal", "macro")]
+            ranges += [dict(min=min(r["min"] for r in ranges), max=max(r["max"] for r in ranges),
+                            default=ranges[0]["default"])]
+            speeds = [af["speeds"][m] for m in ("normal", "fast")]
+            keys = ("step_coarse", "step_fine", "contrast_ratio", "retrigger_ratio", "retrigger_delay",
+                    "pdaf_gain", "pdaf_squelch", "max_slew", "pdaf_frames", "dropout_frames", "step_frames")
+            rows = ",".join("{%s,%s,%s}" % (r["min"], r["max"], r["default"]) for r in ranges)
+            speed_rows = ",".join("{" + ",".join(str(s[k]) for k in keys) + "}" for s in speeds)
+            mapping = af["map"]
+            points = ",".join("{%s,%s}" % tuple(mapping[i:i+2]) for i in range(0, len(mapping), 2))
+            lines.append(f"static const cc_af_tuning {name}_af = {{.ranges={{{rows}}}, .speeds={{{speed_rows}}},"
+                         f" .confidence_epsilon={af['conf_epsilon']}, .confidence_threshold={af['conf_thresh']},"
+                         f" .confidence_clip={af['conf_clip']}, .skip_frames={af['skip_frames']},"
+                         f" .check_for_ir={int(af['check_for_ir'])}, .num_map_points={len(mapping)//2}, .map={{{points}}}}};")
+            fields["af"] = "&" + name + "_af"
         for key, values in (("shutter", normal["shutter"]), ("gain", normal["gain"]),
                             ("target", agc["y_target"]),
                             ("weights", agc["metering_modes"]["centre-weighted"]["weights"])):

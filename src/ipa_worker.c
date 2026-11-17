@@ -149,6 +149,12 @@ static int invoke(cc_ipa *ipa, uint32_t command, const void *data, size_t size, 
                      void **output, size_t *output_size, int output_fds[CC_IPA_WIRE_MAX_FDS], uint32_t *num_output_fds)
 {
     *output = NULL; *output_size = 0; *num_output_fds = 0;
+    if (command==CC_IPA_PROXY_PHOTO_CAPABILITIES) {
+        if (size || num_input_fds) return -EPROTO;
+        cc_photo_capabilities caps;
+        int ret=cc_ipa_get_photo_capabilities(ipa,&caps);
+        return ret<0 ? ret:cc_ipa_wire_encode(CC_IPA_WIRE_PHOTO_CAPABILITIES,&caps,output,output_size);
+    }
     if (command == CC_IPA_PROXY_START || command == CC_IPA_PROXY_STOP || command == CC_IPA_PROXY_DESTROY) {
         if (size || num_input_fds) return -EPROTO;
         if (command == CC_IPA_PROXY_START) return cc_ipa_start(ipa);

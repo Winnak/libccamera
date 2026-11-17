@@ -8,12 +8,13 @@
  * the same wire/IPA ABI and native block sizes. Decode owns all reconstructed
  * pointed-to storage; object views expire on destroy. The ordinary codec does
  * no OS I/O or module execution. */
-#define CC_IPA_WIRE_VERSION 2U
+#define CC_IPA_WIRE_VERSION 3U
 #define CC_IPA_WIRE_MAX_DATA (16U * 1024U * 1024U)
 #define CC_IPA_WIRE_MAX_FDS 192U
 enum cc_ipa_wire_kind {
     CC_IPA_WIRE_CONFIGURATION = 1, CC_IPA_WIRE_REQUEST, CC_IPA_WIRE_SETTINGS,
-    CC_IPA_WIRE_FRAME, CC_IPA_WIRE_METADATA, CC_IPA_WIRE_REFERENCE, CC_IPA_WIRE_VC4
+    CC_IPA_WIRE_FRAME, CC_IPA_WIRE_METADATA, CC_IPA_WIRE_REFERENCE, CC_IPA_WIRE_VC4,
+    CC_IPA_WIRE_PHOTO_CAPABILITIES
 };
 typedef struct cc_ipa_wire cc_ipa_wire;
 int cc_ipa_wire_encode(enum cc_ipa_wire_kind kind, const void *object, void **data, size_t *size);

@@ -272,6 +272,7 @@ static void module_controllers(void)
             .statistics_data = &stats, .statistics_size = sizeof(stats), .isp_controls = s.isp_controls,
             .num_isp_controls = s.num_isp_controls, .request_sensor_controls = manual,
             .num_request_sensor_controls = 2};
+        frame.settings_sensor_controls=s.sensor_controls; frame.num_settings_sensor_controls=3;
         frame.sensor.count = 3;
         memcpy(frame.sensor.controls, s.sensor_controls, sizeof(cc_control) * 3);
         cc_ipa_metadata m;
@@ -343,7 +344,7 @@ static void controller(void)
     CHECK(m.colour_temperature == 4500 && m.frame_duration_ns > 0);
     frame.untrusted = 1;
     OK(cc_ipa_process(ipa, &frame, &m));
-    CHECK(!m.flags);
+    CHECK((m.flags & CC_IPA_METADATA_PHOTO) && !(m.photo_status & CC_PHOTO_STATS_TRUSTED));
     frame.untrusted = 0;
     stats.agc_stats[0].r_sum = UINT64_MAX;
     CHECK(cc_ipa_process(ipa, &frame, &m) == -EPROTO);

@@ -215,6 +215,15 @@ environment text limit is 64 KiB. Exceeding search limits returns `-E2BIG` and
 cleans up the entire partial snapshot. Explicit argument-range errors return
 `-EINVAL`. No threads or background rescans are created.
 
+## Common photographic controls
+
+The calibrated VC4 and PiSP controllers share [normalized request controls,
+capability queries and applied metadata](PHOTO_CONTROLS.md), with independent
+automatic/manual shutter and gain, EV, metering, WB presets/gains, native image
+adjustments, sensor trust policies and calibrated opt-in V3 AF/PDAF. The same
+contract runs through isolated workers. The generic reference controller does not
+advertise these controls.
+
 ## VC4 still profiles
 
 An opt-in VC4 calibrated still controller and `ccamera-still` example now
@@ -224,13 +233,13 @@ anti-flicker. The tool waits for settled settings and saves a PPM with optional
 matching raw/statistics and diagnostic metadata. Two-frame OV5647 delays remain
 provisional. See the [Pi bring-up and validation guide](PI4_OV5647.md).
 Physical timing and image quality still require your Pi captures. The generic
-reference controller remains available. The C IPA ABI is now version 7.
+reference controller remains available. The C IPA ABI is now version 8.
 
 Ten profiles cover standard/NoIR OV5647, V2/IMX219, HQ/IMX477 and standard/wide
 V3/IMX708. `cc_ipa_vc4_options.profile` selects an explicit module override;
 AUTO assumes the standard-colour module for the configured sensor. NoIR uses
 trimmed grey-world AWB. See [coverage, selection and limitations](TUNING.md),
-including HQ lens calibration and V3 AF integration. The separate
+including HQ lens calibration and opt-in V3 AF. The separate
 [`cc_ipa_pisp_create()` controller](TUNING.md#pi-5-cfepisp-photo-path) connects
 PiSP-specific calibration and AE/AWB to CFE/BE request graphs, including isolated
 workers. Native HDR/TDN policy and Pi 5 physical validation remain pending.

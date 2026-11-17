@@ -102,7 +102,7 @@ static int module_process(void *p, const cc_ipa_frame *f, cc_ipa_metadata *m)
 static void test_lifecycle(void)
 {
     struct lifecycle l = {0};
-    cc_ipa_ops ops = {CC_IPA_ABI_VERSION,sizeof(ops),module_configure,module_start,module_stop,module_prepare,module_process,module_destroy,0};
+    cc_ipa_ops ops = {CC_IPA_ABI_VERSION,sizeof(ops),module_configure,module_start,module_stop,module_prepare,module_process,module_destroy,0,NULL};
     cc_ipa *ipa = NULL;
     ops.abi_version = 99; ERROR(cc_ipa_create(&ops,&l,&ipa),EPROTONOSUPPORT); CHECK(!ipa);
     ops.abi_version = CC_IPA_ABI_VERSION; --ops.size; ERROR(cc_ipa_create(&ops,&l,&ipa),EPROTONOSUPPORT);

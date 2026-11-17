@@ -217,6 +217,18 @@ An install test links and runs an external C17 consumer using
 `find_package`, including the public ISP/CFE and native UAPI headers. No physical capture device
 is needed for these tests. Real Pi captures remain unverified in this workspace.
 
+The photographic-control checks cover the normalized VC4/PiSP contract across
+all ten profiles, both directly and through the isolated worker. They check live
+capabilities, independent shutter/gain modes, quantization and native precedence,
+EV feedback, metering weights, all WB modes and NoIR rejection, native gamma/CCM/
+noise/sharpen settings, applied snapshots, startup mistrust and limits. Standard,
+wide and NoIR V3 focus simulations exercise the module calibrations with contrast
+and embedded PDAF, native-code readback, packet loss, stop/start and worker use.
+VC4 and PiSP driver graphs check request copies, WB driver adjustment, native
+parameter delivery, held results, timeouts and cancellation. These checks do not
+establish physical focus, image quality, DMA/cache behavior or measured delays.
+See [photographic controls](PHOTO_CONTROLS.md).
+
 ## Link from another library or application
 
 With both projects in the same build:

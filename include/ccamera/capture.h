@@ -82,6 +82,7 @@ CC_API int cc_capture_create(cc_capture_devices *devices, cc_capture **capture, 
  * module selection, background threads, IPC bridge or encoding is added.
  * Explicitly loaded C modules (ipa_module.h) have the same adoption lifecycle. */
 CC_API int cc_capture_set_ipa(cc_capture *capture, cc_ipa **ipa);
+CC_API int cc_capture_get_photo_capabilities(cc_capture *capture, cc_photo_capabilities *capabilities);
 /* Native source/sensor controls, applied immediately. They are not associated
  * with request sequences and sensor delays are not compensated. Allocated
  * layout-changing controls remain blocked. Calls must be serialized with I/O. */
@@ -236,6 +237,10 @@ CC_API int cc_request_set_sensor_controls(cc_request *request, const cc_control 
  * TRIGGER apply on every reuse until cleared; mode/range/window values persist
  * inside the controller. Requires an IPA; reference modules require AF tuning. */
 CC_API int cc_request_set_af_controls(cc_request *request, const cc_af_controls *controls);
+/* Copy normalized photo commands onto an idle request; NULL clears. A calibrated
+ * photo IPA is required when queued. Unspecified values revert to its defaults
+ * on each request. Commands persist when this request is released/reused. */
+CC_API int cc_request_set_photo_controls(cc_request *request, const cc_photo_controls *controls);
 CC_API int cc_request_get_status(const cc_request *request); /* enum or negative errno. */
 /* Borrowed result after dequeue (or cancellation on capture_close), otherwise
  * NULL. Frame views last until release/stop/close. A failed frame can retain

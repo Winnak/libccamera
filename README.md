@@ -31,7 +31,9 @@ modules for exposure, white balance and autofocus, including explicit
 [VC4 still-profile family](docs/TUNING.md) covers OV5647, IMX219, IMX477 and IMX708,
 including explicit NoIR/wide variants. A separate calibrated
 [PiSP single-exposure path](docs/TUNING.md#pi-5-cfepisp-photo-path) covers the same
-modules on Pi 5 in software. Physical photo acceptance and advanced algorithms
+modules on Pi 5 in software. Both share [photographic controls and metadata](docs/PHOTO_CONTROLS.md)
+with capability queries, manual/automatic exposure and gain, EV/metering, WB,
+native image adjustments and calibrated opt-in V3 AF/PDAF. Physical photo acceptance and advanced algorithms
 remain pending.
 
 Native [IPC transport](docs/IPC.md) provides reference-compatible datagram and

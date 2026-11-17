@@ -9,7 +9,9 @@ are compiled into the library; no runtime JSON reader, Python or libm is needed.
 These are **software-tested profiles**. Physical image quality remains unverified.
 The required hardware acceptance target is Pi 4 with standard-colour OV5647.
 Pi 5 has a separate calibrated CFE/PiSP single-exposure path described below.
-Neither controller accepts the other ISP pipeline.
+Neither controller accepts the other ISP pipeline. Both implement the
+[common photographic controls and metadata contract](PHOTO_CONTROLS.md), including
+module-specific opt-in V3 autofocus.
 
 ## Coverage and module selection
 
@@ -25,7 +27,7 @@ An unknown photo sensor fails with `-ENOTSUP` rather than borrowing a calibratio
 | `imx219_noir` | NoIR v2 | Trimmed grey-world | No physical validation; illumination-dependent colour |
 | `imx477` | HQ, standard colour | Calibrated Bayesian | Generic reference shading; no calibration for a particular attached lens |
 | `imx477_noir` | HQ with IR filter removed | Trimmed grey-world | Generic reference shading; no lens-specific or physical validation |
-| `imx708` | Standard Camera Module v3 | Calibrated Bayesian | No physical validation; still controller does not drive autofocus |
+| `imx708` | Standard Camera Module v3 | Calibrated Bayesian | Opt-in calibrated AF; no physical validation |
 | `imx708_noir` | Standard-lens NoIR v3 | Trimmed grey-world | No physical/AF validation; illumination-dependent colour |
 | `imx708_wide` | Wide Camera Module v3 | Calibrated Bayesian | No physical/AF validation |
 | `imx708_wide_noir` | Wide NoIR v3 | Trimmed grey-world | No physical/AF validation; illumination-dependent colour |
@@ -78,8 +80,8 @@ on the Sony sensors, while OV5647 uses code 16. `--gain-code 0` is an explicit
 manual setting. Check live control limits before choosing a native code.
 
 The [Pi 4/OV5647 guide](PI4_OV5647.md) remains the hardware acceptance procedure.
-For V3, focus must be set separately through the low-level lens API; the
-calibrated still controller currently has no AF integration. For HQ, choose and
+For V3, the calibrated controllers now offer opt-in module-specific AF through
+the [common photo-control API](PHOTO_CONTROLS.md). For HQ, choose and
 focus the physical lens and assess its shading before relying on the photograph.
 
 ## Calibration and algorithm limits
@@ -95,11 +97,11 @@ Neither policy guarantees colour accuracy under arbitrary IR spectra.
 AE uses the profile's centre-weighted regions, normal exposure/gain curve,
 piecewise luminance target, base EV, filtering speed and upper-histogram lower
 constraint. This is a single-exposure still controller, with simpler convergence
-and filtering than upstream. Dynamic contrast, adaptive sharpening, AF integration,
+and filtering than upstream. Dynamic contrast, adaptive sharpening,
 HDR, preview-specific policies and individual-unit/lens calibration remain open.
 Explicit native controls and request tuning remain available.
 
-**IPA ABI is 7.** Rebuild C IPA modules, workers and application consumers together.
+**IPA ABI is 8.** Rebuild C IPA modules, workers and application consumers together.
 The options' module override is also carried by the version-checked native wire
 codec; older workers/modules cannot be mixed with this build.
 
@@ -175,8 +177,9 @@ column. RPFS feedback uses its full 1024-bin/1024-zone, 16-bit statistics.
 Single-exposure denoise uses each profile's **no-TDN** deviation and strength;
 temporal history and HDR are not enabled. Automatic history/HDR policy and
 multi-exposure routing remain separate completion items. Adaptive ALSC/contrast,
-CAC, V3 AF integration and mode-specific binned noise calibration remain limited
-as above. No Pi 5 hardware validation is claimed.
+CAC and mode-specific binned noise calibration remain limited as above. V3
+autofocus is available through the common controls with module-specific
+calibration; physical AF validation remains unavailable. No Pi 5 hardware validation is claimed.
 
 The existing raw capture utility exposes this path with `-q auto` or `-q NAME`:
 

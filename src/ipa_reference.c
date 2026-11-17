@@ -472,7 +472,7 @@ int cc_ipa_reference_create(const cc_ipa_reference_tuning *tuning, cc_ipa **out)
     }
     const cc_ipa_ops ops = {CC_IPA_ABI_VERSION, sizeof(cc_ipa_ops), configure, start, stop, prepare, process, destroy,
         (tuning->flags & CC_IPA_REFERENCE_AF ? CC_IPA_CAP_LENS:0U) |
-        (tuning->max_frame_duration_ns ? CC_IPA_CAP_SENSOR_TIMING:0U)};
+        (tuning->max_frame_duration_ns ? CC_IPA_CAP_SENSOR_TIMING:0U), NULL};
     int ret = cc_ipa_create(&ops, r, out);
     if (ret < 0) destroy(r);
     return ret;

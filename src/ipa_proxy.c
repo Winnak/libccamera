@@ -135,6 +135,19 @@ static int configure(void *context, const cc_ipa_configuration *configuration)
 {
     return object_call(context, CC_IPA_PROXY_CONFIGURE, CC_IPA_WIRE_CONFIGURATION, configuration, 0, NULL);
 }
+static int photo_capabilities(void *context, cc_photo_capabilities *out)
+{
+    struct proxy *proxy=context;
+    clear_held(proxy);
+    void *bytes=NULL; size_t size=0; cc_ipa_wire *wire=NULL;
+    int ret=exchange(proxy,CC_IPA_PROXY_PHOTO_CAPABILITIES,NULL,0,&bytes,&size);
+    if (!ret) {
+        ret=cc_ipa_wire_decode(CC_IPA_WIRE_PHOTO_CAPABILITIES,bytes,size,&wire);
+        if (ret<0) ret=broken(proxy,ret);
+    }
+    if (!ret) *out=*(const cc_photo_capabilities *)cc_ipa_wire_object(wire);
+    free(bytes); cc_ipa_wire_destroy(wire); return ret;
+}
 static int start(void *context)
 {
     struct proxy *proxy = context;
@@ -297,7 +310,8 @@ static int create_proxy(enum cc_ipa_proxy_kind kind, cc_ipa_module *module, cons
     free(response);
     if (ret < 0) goto done;
     cc_ipa_ops ops = {.abi_version = CC_IPA_ABI_VERSION, .size = sizeof(ops), .configure = configure, .start = start,
-        .stop = stop, .prepare = prepare, .process = process, .destroy = destroy, .capabilities = capabilities};
+        .stop = stop, .prepare = prepare, .process = process, .destroy = destroy, .capabilities = capabilities,
+        .photo_capabilities=photo_capabilities};
     ret = cc_ipa_create(&ops, proxy, out);
     if (!ret && vimc_flags) *vimc_flags = flags;
 done:

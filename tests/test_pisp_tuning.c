@@ -143,7 +143,7 @@ static void controllers(void)
             stable=m.flags&CC_IPA_AE_CONVERGED ? stable+1:0;
             if (iteration==79 || iteration==159) CHECK(stable>=3);
             request.timing.vblank=(uint32_t)s.sensor_controls[0].value;
-            frame.untrusted=1; OK(cc_ipa_process(ipa,&frame,&m)); CHECK(!m.flags);
+            frame.untrusted=1; OK(cc_ipa_process(ipa,&frame,&m)); CHECK((m.flags & CC_IPA_METADATA_PHOTO) && !(m.photo_status & CC_PHOTO_STATS_TRUSTED));
         }
         cc_ipa_stop(ipa); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa)); cc_ipa_stop(ipa);
         c.source.width/=2; CHECK(cc_ipa_configure(ipa,&c)==-ENOTSUP);

@@ -39,6 +39,9 @@ struct cc_request {
     bool have_af, lens_write;
     cc_af_controls af_controls;
     cc_af_status af_status;
+    bool have_photo;
+    cc_photo_controls photo;
+    uint32_t photo_overrides;
     cc_vimc_controls vimc_controls;
     cc_uvc_controls uvc_controls;
     struct cc_request_buffer buffers[3];
@@ -72,6 +75,7 @@ struct cc_capture {
     bool started, subscribed, event_seen;
     uint32_t event_sequence;
     cc_sensor_mode_policy policy;
+    bool policy_custom;
     bool policy_seen, ever_started, policy_mode_switch;
     uint32_t policy_first;
     bool trace_enabled;
@@ -344,6 +348,11 @@ int cc_capture_set_controls(cc_capture *c, const cc_control *controls, size_t co
     if (!c) return -EINVAL;
     if (c->dead) return -ENODEV;
     if ((count && !controls) || count > UINT32_MAX || count > SIZE_MAX / sizeof(struct v4l2_ext_control)) return -EINVAL;
+    for (size_t i=0; i<count; ++i)
+        if (controls[i].id==V4L2_CID_HBLANK && (cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_PHOTO)) {
+            if (error_index) *error_index=i;
+            return -EBUSY;
+        }
     for (size_t i = 0; i < count; ++i)
         for (size_t j = 0; j < c->num_delays; ++j) if (controls[i].id == c->delays[j].id) {
             if (error_index) *error_index = i;
@@ -427,7 +436,7 @@ int cc_capture_configure_sensor_policy(cc_capture *c,const cc_sensor_mode_policy
     if (c->dead) return -ENODEV;
     if (c->owned || c->started) return -EBUSY;
     if (p && (p->hide_startup>64 || p->hide_mode_switch>64 || p->mistrust_startup>64 || p->mistrust_mode_switch>64)) return -EINVAL;
-    c->policy=p ? *p:(cc_sensor_mode_policy){0}; c->policy_seen=false;return 0;
+    c->policy=p ? *p:(cc_sensor_mode_policy){0}; c->policy_custom=true; c->policy_seen=false;return 0;
 }
 int cc_capture_enable_sensor_trace(cc_capture *c,int enable)
 {
@@ -805,6 +814,15 @@ int cc_request_set_af_controls(cc_request *r, const cc_af_controls *controls)
     r->af_controls=controls ? *controls:(cc_af_controls){0};
     return 0;
 }
+int cc_request_set_photo_controls(cc_request *r, const cc_photo_controls *controls)
+{
+    if (!r) return -EINVAL;
+    if (r->owner) return -EBUSY;
+    int ret=controls ? cc_photo_validate_controls(controls):0;
+    if (ret<0) return ret;
+    r->have_photo=controls!=NULL; r->photo=controls ? *controls:(cc_photo_controls){0};
+    return 0;
+}
 int cc_request_set_vimc_controls(cc_request *r, const cc_vimc_controls *controls)
 {
     if (!r) return -EINVAL;
@@ -951,7 +969,8 @@ int cc_capture_queue(cc_capture *c, cc_request *r)
             if (cc_request_buffer_overlaps(buffer, &owned->buffers[i])) return -EBUSY;
     }
     if ((r->have_fe && !c->devices.frontend) || (r->have_be && !c->devices.backend) ||
-        (r->num_controls && !c->devices.vc4) || (r->have_af && !c->ipa)) return -ENOTSUP;
+        (r->num_controls && !c->devices.vc4) || (r->have_af && !(cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_LENS)) ||
+        (r->have_photo && !(cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_PHOTO))) return -ENOTSUP;
     if (r->vimc_controls.flags && (!c->devices.camera ||
         c->devices.camera->info.pipeline != CC_PIPELINE_VIMC)) return -ENOTSUP;
     if (r->uvc_controls.flags && (!c->devices.camera ||
@@ -1052,11 +1071,29 @@ int cc_capture_set_ipa(cc_capture *c, cc_ipa **ipa)
         cc_ipa_configuration configuration;
         int ret = ipa_configuration(c, *ipa, &configuration);
         if (!ret) ret = cc_ipa_configure(*ipa, &configuration);
+        if (!ret && (cc_ipa_get_capabilities(*ipa) & CC_IPA_CAP_PHOTO) && !c->policy_custom) {
+            cc_photo_capabilities caps;
+            ret=cc_ipa_get_photo_capabilities(*ipa,&caps);
+            if (!ret) { c->policy=caps.policy; c->policy_seen=false; }
+        }
         if (ret < 0) return ret;
+    }
+    if (!c->policy_custom && (!ipa || !(cc_ipa_get_capabilities(*ipa) & CC_IPA_CAP_PHOTO))) {
+        c->policy=(cc_sensor_mode_policy){0}; c->policy_seen=false;
     }
     cc_ipa_destroy(c->ipa); c->ipa = ipa ? *ipa : NULL;
     if (ipa) *ipa = NULL;
     return 0;
+}
+int cc_capture_get_photo_capabilities(cc_capture *c, cc_photo_capabilities *out)
+{
+    if (!c || !out) return -EINVAL;
+    if (c->dead) return -ENODEV;
+    if (!c->ipa) return -ENOTSUP;
+    cc_photo_capabilities caps;
+    int ret=cc_ipa_get_photo_capabilities(c->ipa,&caps);
+    if (!ret) { caps.policy=c->policy; *out=caps; }
+    return ret;
 }
 static int merge_controls(const cc_control *defaults, size_t count, const cc_control *overrides, size_t num_overrides,
                            cc_control merged[CC_IPA_MAX_CONTROLS], size_t *out_count)
@@ -1071,6 +1108,27 @@ static int merge_controls(const cc_control *defaults, size_t count, const cc_con
     }
     *out_count = count;
     return 0;
+}
+static uint32_t photo_override(uint32_t id)
+{
+    switch (id) {
+    case V4L2_CID_RED_BALANCE: case V4L2_CID_BLUE_BALANCE: case V4L2_CID_DIGITAL_GAIN:
+        return CC_PHOTO_WB;
+    case V4L2_CID_USER_BCM2835_ISP_GAMMA: case V4L2_CID_BRIGHTNESS: case V4L2_CID_CONTRAST:
+        return CC_PHOTO_BRIGHTNESS|CC_PHOTO_CONTRAST;
+    case V4L2_CID_USER_BCM2835_ISP_CC_MATRIX: case V4L2_CID_SATURATION:
+        return CC_PHOTO_SATURATION;
+    case V4L2_CID_USER_BCM2835_ISP_SHARPEN: case V4L2_CID_SHARPNESS:
+        return CC_PHOTO_SHARPNESS;
+    case V4L2_CID_USER_BCM2835_ISP_DENOISE: case V4L2_CID_USER_BCM2835_ISP_CDN:
+        return CC_PHOTO_DENOISE;
+    case V4L2_CID_USER_BCM2835_ISP_BLACK_LEVEL: case V4L2_CID_USER_BCM2835_ISP_GEQ:
+    case V4L2_CID_USER_BCM2835_ISP_DPC: case V4L2_CID_USER_BCM2835_ISP_LENS_SHADING:
+        return 0;
+    default: /* Unknown native controls may affect any image adjustment. */
+        return CC_PHOTO_WB|CC_PHOTO_BRIGHTNESS|CC_PHOTO_CONTRAST|
+            CC_PHOTO_SATURATION|CC_PHOTO_SHARPNESS|CC_PHOTO_DENOISE;
+    }
 }
 static int prepare_ipa(cc_capture *c, cc_request *r)
 {
@@ -1089,7 +1147,7 @@ static int prepare_ipa(cc_capture *c, cc_request *r)
     if (!settings) return -ENOMEM;
     cc_ipa_request input = {.sequence=r->result.sequence,.cookie=r->cookie,
         .sensor_controls=r->sensor_controls,.num_sensor_controls=r->num_sensor_controls,
-        .af=r->have_af ? &r->af_controls:NULL};
+        .af=r->have_af ? &r->af_controls:NULL,.photo=r->have_photo ? &r->photo:NULL};
     ret = cc_capture_get_sensor_timing(c, &input.timing);
     if (ret == -ENOTSUP || ret == -ENOENT) ret = 0;
     if (!ret && (cc_ipa_get_capabilities(c->ipa)&CC_IPA_CAP_SENSOR_TIMING))
@@ -1117,6 +1175,21 @@ static int prepare_ipa(cc_capture *c, cc_request *r)
     if (!ret && vc4 && !c->devices.vc4) ret=-ENOTSUP;
     if (!ret) ret=cc_request_set_vc4_tuning(work,vc4);
     if (!ret) work->colour_temperature = settings->colour_temperature;
+    if (!ret) {
+        work->photo=settings->photo;
+        if (r->have_fe) work->photo_overrides |= CC_PHOTO_METERING;
+        if (r->have_be || r->have_vc4)
+            work->photo_overrides |= CC_PHOTO_BRIGHTNESS|CC_PHOTO_CONTRAST|
+                CC_PHOTO_SATURATION|CC_PHOTO_SHARPNESS|CC_PHOTO_DENOISE;
+        if (r->have_be) work->photo_overrides|=CC_PHOTO_WB;
+        for (size_t i=0; i<r->num_controls; ++i) work->photo_overrides|=photo_override(r->controls[i].id);
+        for (size_t i=0; i<r->num_sensor_controls; ++i) {
+            if (r->sensor_controls[i].id==V4L2_CID_EXPOSURE) work->photo_overrides|=CC_PHOTO_EXPOSURE;
+            if (r->sensor_controls[i].id==V4L2_CID_ANALOGUE_GAIN) work->photo_overrides|=CC_PHOTO_GAIN;
+            if (r->sensor_controls[i].id==V4L2_CID_VBLANK || r->sensor_controls[i].id==V4L2_CID_HBLANK)
+                work->photo_overrides|=CC_PHOTO_FRAME_DURATION;
+        }
+    }
     if (!ret && ((fe && !c->devices.frontend) || (be && !c->devices.backend) ||
                  (work->num_controls && !c->devices.vc4))) ret = -ENOTSUP;
     if (!ret && fe) { struct pisp_fe_config p; ret = cc_cfe_build_parameters(&c->fe, fe, &p); }
@@ -1134,7 +1207,7 @@ static int finish(cc_capture *c, cc_request *r)
     for (uint32_t i = 0; i < 4; ++i) flags |= r->result.backend_auxiliary[i].flags;
     r->result.error = flags & V4L2_BUF_FLAG_ERROR ? -EIO : 0;
     r->result.status = r->result.error ? CC_REQUEST_FAILED : CC_REQUEST_COMPLETE;
-    if (!r->result.error && c->ipa && !r->result.untrusted) {
+    if (!r->result.error && c->ipa && (!r->result.untrusted || (cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_PHOTO))) {
         cc_frame *stats = &r->result.statistics;
         bool vimc = c->devices.camera && c->devices.camera->info.pipeline == CC_PIPELINE_VIMC;
         if ((!vimc || stats->num_planes) &&
@@ -1158,7 +1231,8 @@ static int finish(cc_capture *c, cc_request *r)
             .isp_controls=settings->controls,.num_isp_controls=settings->num_controls,
             .backend=settings->have_be ? &settings->be : NULL,.af=settings->af_status,
             .colour_temperature=settings->colour_temperature,
-            .frontend=c->devices.frontend ? &frontend:NULL};
+            .frontend=c->devices.frontend ? &frontend:NULL,
+            .photo=settings->photo,.photo_overrides=settings->photo_overrides};
         cc_frame *embedded=&r->result.embedded;
         if (embedded->num_planes) {
             if (embedded->num_planes!=1 || !embedded->planes[0].data ||
@@ -1166,7 +1240,7 @@ static int finish(cc_capture *c, cc_request *r)
             frame.embedded_data=(const unsigned char *)embedded->planes[0].data+embedded->planes[0].data_offset;
             frame.embedded_size=embedded->planes[0].bytes_used-embedded->planes[0].data_offset;
         }
-        int ret = vimc && !stats->num_planes ? 0 :
+        int ret = r->result.untrusted || (vimc && !stats->num_planes) ? 0 :
             cc_ipa_parse_statistics(frame.statistics_fourcc, frame.statistics_data, frame.statistics_size, &frame.statistics);
         if (!ret) ret = cc_ipa_process(c->ipa, &frame, &r->result.ipa);
         if (ret < 0) return ret;
@@ -1287,6 +1361,16 @@ static int submit_processor(cc_capture *c, cc_request *r)
     if (settings->num_controls) {
         ret = cc_vc4_isp_set_controls(c->devices.vc4, settings->controls, settings->num_controls, NULL);
         if (ret < 0) return ret;
+        if (cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_PHOTO) {
+            cc_control gains[3]; size_t count=0;
+            for (size_t i=0; i<settings->num_controls; ++i)
+                if (settings->controls[i].id==V4L2_CID_RED_BALANCE || settings->controls[i].id==V4L2_CID_BLUE_BALANCE ||
+                    settings->controls[i].id==V4L2_CID_DIGITAL_GAIN) gains[count++]=(cc_control){.id=settings->controls[i].id};
+            ret=cc_vc4_isp_get_controls(c->devices.vc4,gains,count,NULL);
+            if (ret<0) return ret;
+            for (size_t i=0; i<settings->num_controls; ++i) for (size_t j=0; j<count; ++j)
+                if (settings->controls[i].id==gains[j].id) settings->controls[i].value=gains[j].value;
+        }
     }
     for (uint32_t stream = CC_CAPTURE_OUTPUT0; stream <= CC_CAPTURE_OUTPUT1; ++stream)
         if (c->devices.request_buffers & (1U << stream)) {
