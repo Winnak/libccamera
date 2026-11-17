@@ -242,7 +242,8 @@ trimmed grey-world AWB. See [coverage, selection and limitations](TUNING.md),
 including HQ lens calibration and opt-in V3 AF. The separate
 [`cc_ipa_pisp_create()` controller](TUNING.md#pi-5-cfepisp-photo-path) connects
 PiSP-specific calibration and AE/AWB to CFE/BE request graphs, including isolated
-workers. Native HDR/TDN policy and Pi 5 physical validation remain pending.
+workers. [Automatic native HDR/TDN transactions](NATIVE_PHOTO.md) run above this
+controller with per-photo exposure snapshots and internal history. Pi 5 physical validation remains pending.
 
 ## Autofocus and lens control
 

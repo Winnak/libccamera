@@ -174,9 +174,10 @@ pre-LSC CFE zones using the applied back-end shading snapshot. Metering maps the
 profile's 15×15 weights into the 16×16 CFE grid with a zero-weight final row and
 column. RPFS feedback uses its full 1024-bin/1024-zone, 16-bit statistics.
 
-Single-exposure denoise uses each profile's **no-TDN** deviation and strength;
-temporal history and HDR are not enabled. Automatic history/HDR policy and
-multi-exposure routing remain separate completion items. Adaptive ALSC/contrast,
+Ordinary single-exposure denoise uses each profile's **no-TDN** deviation and strength.
+[Automatic native photo transactions](NATIVE_PHOTO.md) add calibrated temporal
+sequences and short/long HDR brackets, including internal history ownership,
+tone mapping and spatial shadow gains. Adaptive ALSC/contrast,
 CAC and mode-specific binned noise calibration remain limited as above. V3
 autofocus is available through the common controls with module-specific
 calibration; physical AF validation remains unavailable. No Pi 5 hardware validation is claimed.

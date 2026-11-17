@@ -862,8 +862,10 @@ the Unicam image node. Pi 5 raw capture uses `rp1-cfe-csi2-ch0` and disconnects
 competing CFE outputs while it owns the device. This uses the CFE's direct CSI
 capture path described in the [kernel RP1 CFE documentation](https://www.kernel.org/doc/html/latest/admin-guide/media/raspberrypi-rp1-cfe.html).
 Image configuration discovers the native sensor image stream ID. Optional
-embedded capture adds its metadata stream and timestamp pairing; multi-exposure
-HDR graphs and custom virtual-channel policies remain pending. Low-level controls
+embedded capture adds its metadata stream and timestamp pairing.
+[Automatic PiSP HDR brackets](NATIVE_PHOTO.md) use this selected image route at
+successive delayed exposures. Custom simultaneous multi-image virtual-channel
+policies remain pending. Low-level controls
 use native V4L2 sensor IDs and units, with immediate application. The owned
 capture graph optionally adds [frame-delay scheduling](SENSORS.md#sensor-control-scheduling)
 and [reference automatic controls](IPA.md#c-ipa-modules-and-automatic-controls) when a

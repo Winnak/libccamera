@@ -5,6 +5,8 @@
 #include "embedded_capture.h"
 #include "request_buffers.h"
 #include "fence.h"
+#include "pisp_native.h"
+#include <ccamera/linux/pisp/pisp_fe_statistics.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -17,6 +19,16 @@
 #define CC_CAPTURE_MAX_FDS (16U + 3U * CC_CAPTURE_MAX_REQUESTS)
 enum phase { WAITING, CAPTURING, READY, PROCESSING, FINISHED };
 enum sensor_mode { SENSOR_UNSET, SENSOR_EXPLICIT, SENSOR_REQUEST };
+struct native_photo {
+    const struct cc_vc4_profile_data *profile;
+    struct pisp_be_config tuning;
+    struct pisp_fe_config frontend;
+    cc_request *previous, *short_frame;
+    uint32_t stage, per_channel, total, short_lines, long_lines;
+    uint32_t history_frames;
+    struct pisp_statistics statistics;
+    cc_native_photo_status status;
+};
 struct cc_request {
     cc_capture *owner;
     cc_request *next, *done_next;
@@ -52,6 +64,8 @@ struct cc_request {
     cc_capture_result result;
     struct { cc_request *source; enum cc_capture_stream stream; } history[2];
     uint32_t history_users;
+    cc_native_photo_options native_options;
+    struct native_photo *native;
 };
 struct cc_capture {
     cc_capture_devices devices;
@@ -89,7 +103,12 @@ struct cc_capture {
     enum sensor_mode sensor_mode;
     cc_request *head, *tail, *done_head, *done_tail, *capturing, *processing;
     cc_request *slots[CC_CAPTURE_MAX_REQUESTS];
+    cc_request *native_request; /* Exclusive still transaction, including held result. */
 };
+static int native_prepare(cc_capture *c, cc_request *r);
+static int native_tuning(cc_capture *c, cc_request *r);
+static int native_finish(cc_capture *c, cc_request *r);
+static void native_discard(cc_request *r);
 
 static bool same_layout(const cc_format *a, const cc_format *b)
 {
@@ -161,6 +180,30 @@ static int validate_history(cc_capture *c, const cc_request *r, const struct pis
         const cc_pisp_be_aux_configuration *reader = &c->be.auxiliary[2U*i];
         if (!format || !same_layout(format,&reader->format) || offset != reader->compression_offset) return -EPIPE;
         if (source != r && history_frame(source,r->history[i].stream)->num_planes != 1) return -ENODATA;
+    }
+    return 0;
+}
+static int native_validate(cc_capture *c, const cc_request *r)
+{
+    uint32_t features=r->native_options.features;
+    if (!features) return 0;
+    if (!c->devices.frontend || !c->devices.backend || !c->delayed ||
+        !(cc_ipa_get_capabilities(c->ipa)&CC_IPA_CAP_PHOTO)) return -ENOTSUP;
+    if (c->owned || c->sensor_mode==SENSOR_EXPLICIT) return -EBUSY;
+    if (r->have_fe || r->have_be || r->history[0].source || r->history[1].source) return -ENOTSUP;
+    if (c->count<(features==3 ? 3U:2U)) return -ENOSPC;
+    if ((features&CC_NATIVE_PHOTO_TDN) && r->have_photo && (r->photo.flags&CC_PHOTO_DENOISE) &&
+        r->photo.denoise==CC_PHOTO_DENOISE_OFF) return -EINVAL;
+    cc_photo_capabilities caps;
+    int ret=cc_capture_get_photo_capabilities(c,&caps);
+    if (ret<0) return ret;
+    if (!cc_pisp_profile_data(caps.profile)) return -ENOTSUP;
+    for (unsigned i=0; i<2; ++i) if (features&(1U<<i)) {
+        const cc_pisp_be_aux_configuration *a=&c->be.auxiliary[i*2], *b=a+1;
+        if (!a->format.fourcc || !same_layout(&a->format,&b->format) ||
+            a->compression_offset!=b->compression_offset) return -EPIPE;
+        /* STITCH is after BLC, unlike TDN. */
+        if (i && a->compression_offset) return -EPIPE;
     }
     return 0;
 }
@@ -658,6 +701,7 @@ int cc_request_destroy(cc_request *r)
     if (!r) return 0;
     if (r->owner || r->history_users) return -EBUSY;
     clear_history(r);
+    native_discard(r);
     cc_request_destroy(r->work); free_controls(r);
     for (size_t i = 0; i < 3; ++i) { cc_request_buffer_clear(&r->buffers[i]); cc_fence_clear(&r->fences[i]); }
     free(r);
@@ -668,6 +712,16 @@ int cc_request_set_cookie(cc_request *r, uint64_t cookie)
     if (!r) return -EINVAL;
     if (r->owner) return -EBUSY;
     r->cookie = cookie; r->result.cookie = cookie;
+    return 0;
+}
+int cc_request_set_native_photo(cc_request *r, const cc_native_photo_options *o)
+{
+    if (!r) return -EINVAL;
+    if (r->owner) return -EBUSY;
+    if (o && (!o->features || (o->features & ~3U) ||
+        (o->temporal_frames && (o->temporal_frames<2 || o->temporal_frames>8)) ||
+        (o->hdr_ratio!=0 && !(o->hdr_ratio>=2 && o->hdr_ratio<=8)))) return -EINVAL;
+    r->native_options=o ? *o:(cc_native_photo_options){0};
     return 0;
 }
 
@@ -918,6 +972,8 @@ static int halt(cc_capture *c, cc_request *failed, int error)
     c->started = false; c->policy_seen=false;
     memset(c->slots, 0, sizeof(c->slots));
     for (cc_request *r = c->head; r; r = r->next) {
+        clear_history(r);
+        native_discard(r);
         cc_request_destroy(r->work); r->work = NULL;
         uint64_t sequence = r->result.sequence;
         r->slot = UINT32_MAX; r->captured = r->processed = false;
@@ -927,6 +983,7 @@ static int halt(cc_capture *c, cc_request *failed, int error)
             .error = r == failed ? c->error : -ECANCELED };
         done(c, r);
     }
+    c->native_request=NULL;
     return c->error;
 }
 int cc_capture_stop(cc_capture *c) { return c ? halt(c, NULL, 0) : -EINVAL; }
@@ -951,6 +1008,7 @@ int cc_capture_queue(cc_capture *c, cc_request *r)
     if (c && r && r->have_vc4 && !c->devices.vc4) return -ENOTSUP;
     if (!c || !r) return -EINVAL;
     if (r->owner) return -EBUSY;
+    if (c->native_request) return -EBUSY;
     if (c->error || c->dead) return c->error ? c->error : -ENODEV;
     if (c->owned >= CC_CAPTURE_MAX_REQUESTS) return -ENOSPC;
     if (c->sequence == UINT64_MAX) return -EOVERFLOW;
@@ -988,6 +1046,8 @@ int cc_capture_queue(cc_capture *c, cc_request *r)
     }
     int history_ret = validate_history(c,r,r->have_be ? &r->be : NULL);
     if (history_ret < 0) return history_ret;
+    int native_ret=native_validate(c,r);
+    if (native_ret<0) return native_ret;
     uint64_t fence_deadline = 0;
     if (fence_mask(r) && r->fence_timeout_ms) {
         uint64_t now;
@@ -995,6 +1055,11 @@ int cc_capture_queue(cc_capture *c, cc_request *r)
         if (ret < 0) return ret;
         uint64_t duration = (uint64_t)r->fence_timeout_ms * UINT64_C(1000000);
         fence_deadline = now > UINT64_MAX - duration ? UINT64_MAX : now + duration;
+    }
+    if (r->native_options.features) {
+        r->native=calloc(1,sizeof(*r->native));
+        if (!r->native) return -ENOMEM;
+        c->native_request=r;
     }
     if (r->num_sensor_controls) c->sensor_mode = SENSOR_REQUEST;
     r->owner = c; r->phase = WAITING; r->slot = UINT32_MAX;
@@ -1009,6 +1074,205 @@ int cc_capture_queue(cc_capture *c, cc_request *r)
 }
 
 static cc_request *effective(cc_request *r) { return r->work ? r->work : r; }
+
+static cc_control *native_control(cc_request *r, uint32_t id)
+{
+    for (size_t i=0; i<r->num_sensor_controls; ++i)
+        if (r->sensor_controls[i].id==id) return &r->sensor_controls[i];
+    return NULL;
+}
+static int native_exposure(cc_capture *c, cc_request *r, uint64_t *ns, double *gain)
+{
+    cc_sensor_controls *controls=&r->result.sensor;
+    uint32_t exposure=0, code=UINT32_MAX;
+    for (uint32_t i=0; i<controls->count; ++i) {
+        if (controls->controls[i].id==V4L2_CID_EXPOSURE) exposure=(uint32_t)controls->controls[i].value;
+        if (controls->controls[i].id==V4L2_CID_ANALOGUE_GAIN) code=(uint32_t)controls->controls[i].value;
+    }
+    if (!exposure || code==UINT32_MAX) return -ENODATA;
+    const cc_sensor_model *sensor;
+    cc_sensor_timing timing;
+    int ret=cc_capture_get_sensor(c,&sensor);
+    if (!ret) ret=cc_capture_get_sensor_timing(c,&timing);
+    if (!ret) ret=cc_sensor_exposure_time(sensor,&timing,exposure,ns);
+    if (!ret) ret=cc_sensor_gain(sensor,code,gain);
+    return ret;
+}
+static int native_prepare(cc_capture *c, cc_request *r)
+{
+    struct native_photo *n=r->native;
+    if (!n) return 0;
+    cc_request *w=effective(r);
+    cc_control *exposure=native_control(w,V4L2_CID_EXPOSURE);
+    cc_control *blanking=native_control(w,V4L2_CID_VBLANK);
+    if (!w->have_be || !w->have_fe || !exposure || !blanking) return -ENOTSUP;
+    if (!n->stage) {
+        cc_photo_capabilities caps;
+        int ret=cc_capture_get_photo_capabilities(c,&caps);
+        if (ret<0) return ret;
+        n->profile=cc_pisp_profile_data(caps.profile);
+        if (!n->profile) return -ENOTSUP;
+        n->tuning=w->be;
+        ret=cc_cfe_build_parameters(&c->fe,&w->fe,&n->frontend);
+        if (ret<0) return ret;
+        if ((r->native_options.features&CC_NATIVE_PHOTO_HDR) &&
+            (!(w->be.global.bayer_enables&PISP_BE_BAYER_ENABLE_LSC) ||
+             !w->be.lsc.grid_step_x || !w->be.lsc.grid_step_y)) return -ENOTSUP;
+        n->per_channel=r->native_options.features&CC_NATIVE_PHOTO_TDN ?
+            (r->native_options.temporal_frames ? r->native_options.temporal_frames:4):1;
+        n->total=n->per_channel*(r->native_options.features&CC_NATIVE_PHOTO_HDR ? 2U:1U);
+        n->status.features=r->native_options.features;
+        n->long_lines=(uint32_t)exposure->value;
+        n->short_lines=n->long_lines;
+        if (r->native_options.features&CC_NATIVE_PHOTO_HDR) {
+            cc_sensor_timing timing;
+            cc_sensor_timing_limits limits;
+            const cc_sensor_model *sensor;
+            uint64_t long_ns;
+            ret=cc_capture_get_sensor(c,&sensor);
+            if (!ret) ret=cc_capture_get_sensor_timing(c,&timing);
+            if (!ret) ret=cc_capture_get_sensor_timing_limits(c,&limits);
+            if (!ret) ret=cc_sensor_exposure_time(sensor,&timing,n->long_lines,&long_ns);
+            if (ret<0) return ret;
+            limits.min_hblank=limits.max_hblank=timing.hblank;
+            limits.min_vblank=limits.max_vblank=(uint32_t)blanking->value;
+            double ratio=r->native_options.hdr_ratio!=0 ? r->native_options.hdr_ratio:4;
+            uint64_t wanted=(uint64_t)((double)long_ns/ratio);
+            if (!w->photo.exposure_ns && !native_control(r,V4L2_CID_EXPOSURE)) {
+                ret=cc_sensor_flicker_exposure(sensor,&timing,wanted,w->photo.mains_hz,&wanted);
+                if (ret<0) return ret;
+            }
+            cc_sensor_exposure_plan plan;
+            ret=cc_sensor_plan_exposure(sensor,&limits,wanted,0,0,&plan);
+            if (ret<0) return ret;
+            if ((double)long_ns/(double)plan.exposure_ns<2) return -ERANGE;
+            n->short_lines=plan.exposure_lines;
+        }
+    }
+    exposure->value=n->stage<n->per_channel ? n->short_lines:n->long_lines;
+    return 0;
+}
+static void native_pin(cc_request *r, unsigned input, cc_request *source, enum cc_capture_stream stream)
+{
+    r->history[input].source=source; r->history[input].stream=stream;
+    ++source->history_users;
+}
+static bool native_stale(cc_capture *c, const cc_request *r, const cc_request *old, uint32_t stages)
+{
+    uint32_t delay=0;
+    for (size_t i=0; i<c->num_delays; ++i) if (c->delays[i].frames>delay) delay=c->delays[i].frames;
+    uint32_t maximum_gap=(delay+2)*stages, gap=r->result.raw.sequence-old->result.raw.sequence;
+    if (!gap || gap>maximum_gap) return true;
+    uint64_t now=r->result.raw.timestamp_ns, previous=old->result.raw.timestamp_ns;
+    if (now<previous) return true;
+    cc_sensor_timing timing; uint64_t duration;
+    if (cc_capture_get_sensor_timing(c,&timing)<0 || cc_sensor_frame_duration(&timing,&duration)<0) return true;
+    uint64_t maximum_age=duration>UINT64_MAX/maximum_gap ? UINT64_MAX:duration*maximum_gap;
+    if (maximum_age<UINT64_C(1000000000)) maximum_age=UINT64_C(1000000000);
+    return now && previous && now-previous>maximum_age;
+}
+static int native_tuning(cc_capture *c, cc_request *r)
+{
+    struct native_photo *n=r->native;
+    if (!n) return 0;
+    cc_request *w=effective(r);
+    w->be=n->tuning;
+    uint64_t ns; double gain;
+    int ret=native_exposure(c,r,&ns,&gain);
+    if (ret<0) return ret;
+    bool short_channel=n->stage<n->per_channel;
+    if (!n->stage) n->status.first_sequence=r->result.raw.sequence;
+    n->status.last_sequence=r->result.raw.sequence;
+    n->status.analogue_gain=gain;
+    if (short_channel) n->status.short_exposure_ns=ns;
+    else n->status.long_exposure_ns=ns;
+    if (!(r->native_options.features&CC_NATIVE_PHOTO_HDR)) n->status.long_exposure_ns=ns;
+    if (r->native_options.features&CC_NATIVE_PHOTO_TDN) {
+        double ratio=1;
+        bool reset=!n->previous;
+        if (n->previous) {
+            uint64_t previous_ns; double previous_gain;
+            ret=native_exposure(c,n->previous,&previous_ns,&previous_gain);
+            if (ret<0) return ret;
+            ratio=((double)ns*gain)/((double)previous_ns*previous_gain);
+            reset=ratio>=4 || ratio<0.25 || r->result.untrusted || n->previous->result.untrusted ||
+                native_stale(c,r,n->previous,1);
+        }
+        if (reset) { n->history_frames=0; ratio=1; ++n->status.temporal_resets; }
+        cc_pisp_native_denoise(n->profile,gain,ratio,n->history_frames,
+            (r->native_options.features&CC_NATIVE_PHOTO_HDR)!=0,&w->be);
+        if (!reset) native_pin(r,0,n->previous,CC_CAPTURE_TDN_OUTPUT);
+    }
+    if ((r->native_options.features&CC_NATIVE_PHOTO_HDR) && n->stage+1==n->total) {
+        if (!n->short_frame) return -ENODATA;
+        if (native_stale(c,r,n->short_frame,n->per_channel+1)) return -ESTALE;
+        uint64_t short_ns; double short_gain;
+        ret=native_exposure(c,n->short_frame,&short_ns,&short_gain);
+        if (ret<0) return ret;
+        double ratio=((double)ns*gain)/((double)short_ns*short_gain);
+        if (!(ratio>=2 && ratio<=32768)) return -ERANGE;
+        n->status.hdr_ratio=ratio;
+        cc_pisp_native_hdr(n->profile,1/ratio,&n->frontend,&n->statistics,&w->be);
+        native_pin(r,1,n->short_frame,CC_CAPTURE_STITCH_OUTPUT);
+    }
+    return validate_history(c,r,&w->be);
+}
+static int native_release_frame(cc_capture *c, cc_request **frame)
+{
+    cc_request *h=*frame;
+    if (!h) return 0;
+    int ret=cc_pisp_be_release(c->devices.backend,h->slot);
+    if (!ret) ret=cc_cfe_release(c->devices.frontend,h->slot);
+    if (ret<0) return ret;
+    c->slots[h->slot]=NULL;
+    free(h); *frame=NULL;
+    return 0;
+}
+static void native_discard(cc_request *r)
+{
+    struct native_photo *n=r->native;
+    if (!n) return;
+    /* Only after stop has retired all DMA, or after normal history release. */
+    free(n->previous); free(n->short_frame); free(n); r->native=NULL;
+}
+static int native_finish(cc_capture *c, cc_request *r)
+{
+    struct native_photo *n=r->native;
+    if (!n) return 0;
+    if (r->result.error) return r->result.error;
+    clear_history(r); /* Every input DMA completed before old history is freed. */
+    int ret=native_release_frame(c,&n->previous);
+    if (ret<0) return ret;
+    ++n->status.frames; ++n->history_frames;
+    if (n->stage+1==n->total) {
+        ret=native_release_frame(c,&n->short_frame);
+        if (ret<0) return ret;
+        r->result.native_photo=n->status;
+        return 0;
+    }
+    if ((r->native_options.features&CC_NATIVE_PHOTO_HDR) && n->stage+1==n->per_channel) {
+        const cc_frame *f=&r->result.statistics;
+        if (f->num_planes!=1 || !f->planes[0].data || f->planes[0].bytes_used<f->planes[0].data_offset ||
+            f->planes[0].bytes_used-f->planes[0].data_offset<sizeof(struct pisp_statistics)) return -ENODATA;
+        const unsigned char *data=(const unsigned char *)f->planes[0].data+f->planes[0].data_offset;
+        memcpy(&n->statistics,data,sizeof(n->statistics));
+        uint64_t total=0;
+        for (unsigned i=0; i<1024; ++i) total+=n->statistics.agc.histogram[i];
+        if (!total) return -ENODATA;
+    }
+    cc_request *h=calloc(1,sizeof(*h));
+    if (!h) return -ENOMEM;
+    h->owner=c; h->slot=r->slot; h->delivered=true; h->result=r->result;
+    h->captured=h->processed=true;
+    c->slots[h->slot]=h;
+    if ((r->native_options.features&CC_NATIVE_PHOTO_HDR) && n->stage+1==n->per_channel) {
+        n->short_frame=h; n->history_frames=0;
+    } else n->previous=h;
+    ++n->stage;
+    r->slot=UINT32_MAX; r->captured=r->processed=false; r->phase=WAITING;
+    r->result=(cc_capture_result){.status=CC_REQUEST_PENDING,.cookie=r->cookie,.sequence=r->result.sequence};
+    return 1;
+}
 
 static int ipa_configuration(cc_capture *c, const cc_ipa *ipa, cc_ipa_configuration *out)
 {
@@ -1092,7 +1356,19 @@ int cc_capture_get_photo_capabilities(cc_capture *c, cc_photo_capabilities *out)
     if (!c->ipa) return -ENOTSUP;
     cc_photo_capabilities caps;
     int ret=cc_ipa_get_photo_capabilities(c->ipa,&caps);
-    if (!ret) { caps.policy=c->policy; *out=caps; }
+    if (!ret) {
+        caps.policy=c->policy;
+        if (c->devices.frontend && c->devices.backend && c->delayed && c->count>=2 &&
+            cc_pisp_profile_data(caps.profile)) {
+            for (unsigned i=0; i<2; ++i) {
+                const cc_pisp_be_aux_configuration *a=&c->be.auxiliary[2*i], *b=a+1;
+                if (a->format.fourcc && same_layout(&a->format,&b->format) &&
+                    a->compression_offset==b->compression_offset && (!i || !a->compression_offset))
+                    caps.flags |= i ? CC_PHOTO_CAP_NATIVE_HDR:CC_PHOTO_CAP_NATIVE_TDN;
+            }
+        }
+        *out=caps;
+    }
     return ret;
 }
 static int merge_controls(const cc_control *defaults, size_t count, const cc_control *overrides, size_t num_overrides,
@@ -1207,6 +1483,8 @@ static int finish(cc_capture *c, cc_request *r)
     for (uint32_t i = 0; i < 4; ++i) flags |= r->result.backend_auxiliary[i].flags;
     r->result.error = flags & V4L2_BUF_FLAG_ERROR ? -EIO : 0;
     r->result.status = r->result.error ? CC_REQUEST_FAILED : CC_REQUEST_COMPLETE;
+    int native_ret=native_finish(c,r);
+    if (native_ret) return native_ret<0 ? native_ret:0;
     if (!r->result.error && c->ipa && (!r->result.untrusted || (cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_PHOTO))) {
         cc_frame *stats = &r->result.statistics;
         bool vimc = c->devices.camera && c->devices.camera->info.pipeline == CC_PIPELINE_VIMC;
@@ -1288,7 +1566,7 @@ static int captured(cc_capture *c, cc_request *r)
     uint32_t mistrust=c->policy_mode_switch ? c->policy.mistrust_mode_switch:c->policy.mistrust_startup;
     uint32_t hide=c->policy_mode_switch ? c->policy.hide_mode_switch:c->policy.hide_startup;
     r->result.untrusted=age<mistrust;
-    if (age<hide && !(r->result.raw.flags & V4L2_BUF_FLAG_ERROR)) {
+    if ((age<hide || (r->native && age<mistrust)) && !(r->result.raw.flags & V4L2_BUF_FLAG_ERROR)) {
         int released=c->devices.frontend ? cc_cfe_release(c->devices.frontend,r->slot):0;
         if (released<0) return released;
         r->result.raw=(cc_frame){0};r->result.statistics=(cc_frame){0};
@@ -1348,6 +1626,8 @@ static int processed(cc_capture *c, cc_request *r)
 }
 static int submit_processor(cc_capture *c, cc_request *r)
 {
+    int native_ret=native_tuning(c,r);
+    if (native_ret<0) return native_ret;
     cc_request *settings = effective(r);
     cc_dmabuf_plane planes[CC_MAX_PLANES];
     uint32_t n = 0;
@@ -1449,7 +1729,8 @@ int cc_capture_dispatch(cc_capture *c)
             if (slot < c->count) for (cc_request *r = c->head; r; r = r->next) if (r->phase == WAITING) {
                 if (fence_mask(r)) break;
                 r->slot = slot; c->slots[slot] = r;
-                int ret = prepare_ipa(c, r);
+                int ret = r->work ? 0:prepare_ipa(c, r);
+                if (!ret) ret=native_prepare(c,r);
                 if (ret < 0) return halt(c, r, ret);
                 if (c->delayed) {
                     ret = subscribe(c, true);
@@ -1614,6 +1895,8 @@ int cc_capture_release(cc_capture *c, cc_request *r)
     *link = r->next;
     if (c->tail == r) c->tail = previous;
     --c->owned; r->owner = NULL; r->next = NULL; r->slot = UINT32_MAX;
+    if (c->native_request==r) c->native_request=NULL;
+    native_discard(r);
     cc_request_destroy(r->work); r->work = NULL;
     r->result = (cc_capture_result) { .cookie = r->cookie };
     return 0;

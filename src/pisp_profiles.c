@@ -403,6 +403,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.0,
         .lux_y = 12388,
         .lux_reference = 870,
+        .temporal = {{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05},{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_OV5647_NOIR, "ov5647_noir", "ov5647", "ov5647_noir-pisp-aae480573cd3-calibration-v1", 1},
@@ -449,6 +451,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.0,
         .lux_y = 12388,
         .lux_reference = 870,
+        .temporal = {{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05},{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX219, "imx219", "imx219", "imx219-pisp-3a5cc45fa99d-calibration-v1", 0},
@@ -500,6 +504,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.0,
         .lux_y = 11460,
         .lux_reference = 800,
+        .temporal = {{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05},{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX219_NOIR, "imx219_noir", "imx219", "imx219_noir-pisp-fe6fd1f25dc7-calibration-v1", 1},
@@ -546,6 +552,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.0,
         .lux_y = 11460,
         .lux_reference = 800,
+        .temporal = {{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05},{0.6,3.2,0.95,0.75,66.66666666666667,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX477, "imx477", "imx477", "imx477-pisp-62f441da411d-calibration-v1", 4},
@@ -597,6 +605,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.0,
         .lux_y = 15051,
         .lux_reference = 740,
+        .temporal = {{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05},{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX477_NOIR, "imx477_noir", "imx477", "imx477_noir-pisp-e559f3f2b5f7-calibration-v1", 5},
@@ -643,6 +653,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.0,
         .lux_y = 15051,
         .lux_reference = 740,
+        .temporal = {{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05},{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX708, "imx708", "imx708", "imx708-pisp-fdb60cd34e51-calibration-v1", 0},
@@ -695,6 +707,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.12,
         .lux_y = 13994,
         .lux_reference = 810,
+        .temporal = {{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05},{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX708_NOIR, "imx708_noir", "imx708", "imx708_noir-pisp-09a6e8ec2644-calibration-v1", 1},
@@ -742,6 +756,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.12,
         .lux_y = 13994,
         .lux_reference = 810,
+        .temporal = {{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05},{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX708_WIDE, "imx708_wide", "imx708", "imx708_wide-pisp-c66731a2ebb2-calibration-v1", 2},
@@ -794,6 +810,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.12,
         .lux_y = 13859,
         .lux_reference = 810,
+        .temporal = {{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05},{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     },
     {
         .info = {CC_VC4_PROFILE_IMX708_WIDE_NOIR, "imx708_wide_noir", "imx708", "imx708_wide_noir-pisp-395b9f018de2-calibration-v1", 3},
@@ -841,6 +859,8 @@ static const struct cc_vc4_profile_data profiles[] = {
         .lux_gain = 1.12,
         .lux_y = 13859,
         .lux_reference = 810,
+        .temporal = {{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05},{0.6,3.2,0.95,0.75,33.333333333333336,1.0,0.05}},
+        .hdr = {50000,0,13,0.005,0,8,1.5,2.0,3},
     }
 };
 const struct cc_vc4_profile_data *cc_pisp_profile_data(enum cc_vc4_profile profile)

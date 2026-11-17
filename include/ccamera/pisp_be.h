@@ -89,8 +89,8 @@ CC_API int cc_pisp_be_submit(cc_pisp_be *be, uint32_t index, const cc_dmabuf_pla
  * remain dequeued until completion/cancellation, like the main source.
  * An input or another output must not alias a job's writable buffers; rejected
  * with -EEXIST before importing. NULL auxiliary is valid when no readers are
- * enabled. Auxiliary jobs currently use this manual API; owned capture graphs
- * reject such configurations. */
+ * enabled. Capture graphs support manual request history bindings and automatic
+ * native still transactions; see capture.h and pisp_tuning.h. */
 CC_API int cc_pisp_be_submit_with_auxiliary(cc_pisp_be *be, uint32_t index,
     const cc_dmabuf_plane *planes, uint32_t num_planes, const cc_frame *input,
     const cc_pisp_be_aux_input auxiliary[2], const struct pisp_be_config *tuning, uint64_t cookie);

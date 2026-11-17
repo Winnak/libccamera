@@ -74,6 +74,11 @@ struct fake {
     bool clock_error;
     bool fresh_exports;
     bool history_ports;
+    bool native_photo;
+    bool empty_native_stats, native_source_error;
+    uint64_t native_timestamp_step;
+    unsigned native_jobs;
+    struct pisp_be_config native_configs[16];
     uint64_t export_identity;
     int create_error, fail_identity;
     bool shading_test, heap_open, shading_open, refuse_heap, fail_shading_map, fail_sync;
@@ -667,7 +672,7 @@ static void process_cfe(struct fake *f)
                            2.0*f->fe_parameters.rgby.gain_b)/1024;
         uint32_t bin=luma>=1 ? 1023U : (uint32_t)(luma*1024);
         struct pisp_statistics *s=stats->data; memset(s,0,sizeof(*s));
-        s->agc.histogram[bin]=10000;
+        s->agc.histogram[bin]=f->empty_native_stats ? 0U:10000U;
         uint64_t sum=(uint64_t)(level*65536*1000);
         CHECK(sum*2<=UINT32_MAX);
         s->awb.zones[0]=(struct pisp_awb_statistics_zone) {
@@ -682,6 +687,7 @@ static void process_cfe(struct fake *f)
         for (int port=4;port<=6;++port) {
             struct buffer *b=&f->nodes[port].buffers[i];
             b->timestamp=UINT64_C(123456000000)+(uint64_t)f->cfe_frame*(f->af_lens ? UINT64_C(33333334):UINT64_C(1000000));
+            if (f->native_timestamp_step) b->timestamp=UINT64_C(123456000000)+(uint64_t)f->cfe_frame*f->native_timestamp_step;
             b->used=b->size; b->done=true;
         }
         if (f->embedded) {
@@ -1182,6 +1188,10 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         } else if (f->pisp && node == 2) {
             CHECK(b->used == sizeof(struct pisp_be_tiles_config));
             memcpy(&f->last_parameters, b->data, sizeof(f->last_parameters));
+            if (f->native_photo) {
+                CHECK(f->native_jobs<16);
+                f->native_configs[f->native_jobs++]=f->last_parameters.config;
+            }
             CHECK(f->last_parameters.num_tiles > 0 && f->last_parameters.num_tiles <= 64);
             CHECK(f->last_parameters.config.input_format.width == 128);
             CHECK(f->last_parameters.config.output_format[0].image.stride == (int32_t)f->nodes[1].format.planes[0].stride);
@@ -1232,6 +1242,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         v->timestamp.tv_sec = (long)(b->timestamp / UINT64_C(1000000000));
         v->timestamp.tv_usec = (long)((b->timestamp % UINT64_C(1000000000)) / 1000);
         v->flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_SOE;
+        if (f->native_source_error && node==4) v->flags|=V4L2_BUF_FLAG_ERROR;
         return 0;
     }
     return -EAGAIN;
@@ -2210,7 +2221,8 @@ static cc_capture *pipeline_requests_mode(struct fake *f, uint32_t request_buffe
             config.auxiliary[i].format=config.input;
             config.auxiliary[i].compression_offset=config.compression_offset;
         }
-        OK(cc_pisp_be_configure(d.backend, &config));
+        if (f->native_photo) OK(cc_pisp_be_configure_native_photo(d.backend,&config,3));
+        else OK(cc_pisp_be_configure(d.backend, &config));
         uint32_t count = 3;
         OK(cc_pisp_be_allocate_buffers_with_memory(d.backend, memories, &count));
     } else {
@@ -2252,7 +2264,7 @@ static cc_capture *pipeline_requests_mode(struct fake *f, uint32_t request_buffe
         cc_cfe_close(d.frontend); cc_camera_close(d.camera); return NULL;
     }
     OK(cc_capture_create(&d, &capture, &count));
-    CHECK(count == 2 && !d.camera && !d.frontend && !d.vc4 && !d.backend);
+    CHECK(count == (f->native_photo ? f->counts[2]:2U) && !d.camera && !d.frontend && !d.vc4 && !d.backend);
     return capture;
 }
 
@@ -3341,6 +3353,171 @@ static void test_vc4_photo_graph(void)
     r=cc_request_get_result(out); CHECK(r->ipa.red_gain==1.75 && !(r->ipa.flags & CC_IPA_AWB_CONVERGED));
     OK(cc_capture_release(capture,out)); cc_capture_close(capture); OK(cc_request_destroy(request)); finished(&f);
 }
+static cc_capture *native_graph(struct fake *f, uint32_t compression, uint32_t slots)
+{
+    init(f); f->cfe=f->pisp=f->timing_plan=f->photo_profile=f->physical_array_larger=f->native_photo=true;
+    f->counts[2]=slots; f->compression=compression;
+    f->exposure=20;
+    cc_capture *capture=pipeline_requests(f);
+    OK(cc_capture_configure_sensor_defaults(capture));
+    cc_ipa_pisp_options options={.profile=CC_VC4_PROFILE_IMX219,.mains_hz=0,.red_gain=2,.blue_gain=0.5};
+    cc_ipa *ipa;
+    if (proxy_worker) {
+        cc_ipa_proxy_options proxy={.worker_path=proxy_worker}; OK(cc_ipa_pisp_create_proxy(&options,&proxy,&ipa));
+    } else OK(cc_ipa_pisp_create(&options,&ipa));
+    OK(cc_capture_set_ipa(capture,&ipa));
+    return capture;
+}
+static void test_native_photo(void)
+{
+    for (uint32_t compression=0; compression<4; ++compression)
+    for (uint32_t features=1; features<=3; ++features) for (unsigned choice=0; choice<3; ++choice) {
+        unsigned frames=choice==0 ? 0U:choice==1 ? 2U:8U;
+        struct fake f;
+        cc_capture *capture=native_graph(&f,compression,3);
+        cc_photo_capabilities caps; OK(cc_capture_get_photo_capabilities(capture,&caps));
+        CHECK((caps.flags&(CC_PHOTO_CAP_NATIVE_TDN|CC_PHOTO_CAP_NATIVE_HDR))==24);
+        cc_request *request, *other, *out=NULL;
+        OK(cc_request_create(72,&request)); OK(cc_request_create(73,&other));
+        cc_native_photo_options options={.features=features,.temporal_frames=frames,.hdr_ratio=(double)frames};
+        OK(cc_request_set_native_photo(request,&options));
+        cc_photo_controls photo={.flags=CC_PHOTO_EXPOSURE|CC_PHOTO_GAIN,.exposure_ns=80000,.analogue_gain=2};
+        OK(cc_request_set_photo_controls(request,&photo));
+        for (unsigned restart=0; restart<2; ++restart) {
+            f.native_jobs=0;
+            int queued=cc_capture_queue(capture,request);
+            if (queued) fprintf(stderr,"native features=%u frames=%u restart=%u queue=%d\n",features,frames,restart,queued);
+            OK(queued);
+            ERROR(cc_capture_queue(capture,other),EBUSY);
+            ERROR(cc_request_set_native_photo(request,NULL),EBUSY);
+            f.delayed_port=13;
+            out=NULL;
+            ERROR(cc_capture_dequeue(capture,&out,2),ETIMEDOUT); CHECK(!out && f.native_jobs==1);
+            f.delayed_port=-1;
+            OK(cc_capture_dequeue(capture,&out,100)); CHECK(out==request);
+            const cc_capture_result *r=cc_request_get_result(out);
+            CHECK(r->status==CC_REQUEST_COMPLETE && !r->error);
+            const cc_native_photo_status *s=&r->native_photo;
+            unsigned per=features&CC_NATIVE_PHOTO_TDN ? (frames ? frames:4U):1U;
+            CHECK(s->features==features && s->frames==per*(features&CC_NATIVE_PHOTO_HDR ? 2U:1U));
+            CHECK(f.native_jobs==s->frames && s->last_sequence>s->first_sequence && s->analogue_gain==2);
+            CHECK(r->ipa.exposure_ns==s->long_exposure_ns && r->ipa.analogue_gain==2);
+            for (unsigned i=0; i<f.native_jobs; ++i) {
+                const struct pisp_be_config *b=&f.native_configs[i];
+                CHECK(!!(b->global.bayer_enables&PISP_BE_BAYER_ENABLE_TDN)==!!(features&CC_NATIVE_PHOTO_TDN));
+                CHECK(!!(b->global.bayer_enables&PISP_BE_BAYER_ENABLE_STITCH)==
+                    !!((features&CC_NATIVE_PHOTO_HDR) && i+1==f.native_jobs));
+                if (features&CC_NATIVE_PHOTO_TDN) {
+                    if (!(i%per)) CHECK(b->tdn.reset==1 && !(b->global.bayer_enables&PISP_BE_BAYER_ENABLE_TDN_INPUT));
+                    else if (!b->tdn.reset) CHECK(b->tdn.ratio==16384 && b->global.bayer_enables&PISP_BE_BAYER_ENABLE_TDN_INPUT);
+                    CHECK(b->tdn.noise_slope>0 && b->tdn.threshold==3277 && b->tdn.black_level==4096);
+                }
+            }
+            if (features&CC_NATIVE_PHOTO_HDR) {
+                const struct pisp_be_config *b=&f.native_configs[f.native_jobs-1];
+                double wanted=frames ? (double)frames:4;
+                CHECK(s->hdr_ratio>=wanted && s->hdr_ratio<wanted+1 && s->long_exposure_ns==80000);
+                CHECK(b->stitch.threshold_lo==50000 && b->stitch.threshold_diff_power==13);
+                CHECK(b->stitch.exposure_ratio&PISP_BE_STITCH_STREAMING_LONG);
+                CHECK(b->global.bayer_enables&PISP_BE_BAYER_ENABLE_TONEMAP);
+                CHECK(b->tonemap.strength==384 && b->tonemap.lut[32]);
+            } else CHECK(s->hdr_ratio==0 && s->long_exposure_ns==s->short_exposure_ns);
+            OK(cc_capture_release(capture,out));
+            OK(cc_capture_stop(capture));
+        }
+        f.native_jobs=0;
+        OK(cc_capture_queue(capture,request)); f.delayed_port=15;
+        ERROR(cc_capture_dequeue(capture,&out,2),ETIMEDOUT);
+        OK(cc_capture_stop(capture)); OK(cc_capture_dequeue(capture,&out,0));
+        CHECK(cc_request_get_result(out)->status==CC_REQUEST_CANCELLED);
+        OK(cc_capture_release(capture,out));
+        cc_capture_close(capture); OK(cc_request_destroy(request)); OK(cc_request_destroy(other)); finished(&f);
+    }
+}
+static void test_native_photo_failures(void)
+{
+    const unsigned long operations[]={VIDIOC_QBUF,VIDIOC_STREAMON,VIDIOC_DQBUF};
+    for (unsigned node=12; node<=15; ++node) for (unsigned op=0; op<3; ++op) {
+        struct fake f; cc_capture *c=native_graph(&f,0,3);
+        cc_request *r,*out=NULL; OK(cc_request_create(80,&r));
+        cc_native_photo_options options={.features=3,.temporal_frames=2};
+        cc_photo_controls photo={.flags=CC_PHOTO_EXPOSURE,.exposure_ns=80000};
+        OK(cc_request_set_native_photo(r,&options)); OK(cc_request_set_photo_controls(r,&photo));
+        OK(cc_capture_queue(c,r));
+        f.fail_req=operations[op]; f.fail_node=(int)node; f.fail_nth=1; f.fail_errno=EIO;
+        /* Output failures after the first stage exercise retained histories. */
+        if (op!=1 && (node==13 || node==15)) f.fail_nth=2;
+        OK(cc_capture_dequeue(c,&out,100)); CHECK(out==r);
+        CHECK(cc_request_get_result(out)->status==CC_REQUEST_FAILED && cc_request_get_result(out)->error==-EIO);
+        OK(cc_capture_release(c,out)); cc_capture_close(c); OK(cc_request_destroy(r)); finished(&f);
+    }
+    for (unsigned fault=0; fault<4; ++fault) {
+        struct fake f; cc_capture *c=native_graph(&f,0,3);
+        cc_request *r,*out=NULL; OK(cc_request_create(81,&r));
+        cc_native_photo_options options={.features=3,.temporal_frames=2};
+        cc_photo_controls photo={.flags=CC_PHOTO_EXPOSURE,.exposure_ns=80000};
+        OK(cc_request_set_native_photo(r,&options)); OK(cc_request_set_photo_controls(r,&photo));
+        OK(cc_capture_queue(c,r)); f.delayed_port=14; /* Final fusion holds both histories. */
+        ERROR(cc_capture_dequeue(c,&out,2),ETIMEDOUT);
+        CHECK(f.native_jobs==4);
+        if (fault==3) {
+            cc_capture_close(c); OK(cc_request_destroy(r));
+        } else {
+            if (fault) { f.fail_req=VIDIOC_STREAMOFF; f.fail_node=fault==1 ? 13:14; f.fail_nth=1; f.fail_errno=EIO; }
+            if (fault) ERROR(cc_capture_stop(c),EIO); else OK(cc_capture_stop(c));
+            OK(cc_capture_dequeue(c,&out,0)); CHECK(cc_request_get_result(out)->status==CC_REQUEST_CANCELLED);
+            OK(cc_capture_release(c,out)); cc_capture_close(c); OK(cc_request_destroy(r));
+        }
+        finished(&f);
+    }
+    struct fake f; cc_capture *c=native_graph(&f,0,3);
+    cc_request *r; OK(cc_request_create(82,&r));
+    cc_native_photo_options options={.features=3,.temporal_frames=1};
+    ERROR(cc_request_set_native_photo(r,&options),EINVAL);
+    options.temporal_frames=2; options.hdr_ratio=9; ERROR(cc_request_set_native_photo(r,&options),EINVAL);
+    options.hdr_ratio=0; OK(cc_request_set_native_photo(r,&options));
+    cc_photo_controls photo={.flags=CC_PHOTO_DENOISE,.denoise=CC_PHOTO_DENOISE_OFF};
+    OK(cc_request_set_photo_controls(r,&photo)); ERROR(cc_capture_queue(c,r),EINVAL);
+    OK(cc_request_set_photo_controls(r,NULL));
+    struct pisp_be_config be={0}; OK(cc_request_set_tuning(r,NULL,&be)); ERROR(cc_capture_queue(c,r),ENOTSUP);
+    OK(cc_request_set_tuning(r,NULL,NULL));
+    cc_request *other; OK(cc_request_create(83,&other)); OK(cc_capture_queue(c,other));
+    ERROR(cc_capture_queue(c,r),EBUSY); cc_capture_close(c);
+    OK(cc_request_destroy(other)); OK(cc_request_destroy(r)); finished(&f);
+    for (unsigned fault=0; fault<5; ++fault) {
+        c=native_graph(&f,0,3); OK(cc_request_create(84,&r));
+        options=(cc_native_photo_options){.features=fault==3 ? CC_NATIVE_PHOTO_TDN:CC_NATIVE_PHOTO_HDR};
+        photo=(cc_photo_controls){.flags=CC_PHOTO_EXPOSURE,.exposure_ns=fault==0 ? 1600U:80000U};
+        if (fault==1 || fault==3) f.native_timestamp_step=UINT64_C(2000000000);
+        if (fault==2) f.empty_native_stats=true;
+        if (fault==4) f.native_source_error=true;
+        OK(cc_request_set_photo_controls(r,&photo)); OK(cc_request_set_native_photo(r,&options));
+        OK(cc_capture_queue(c,r)); cc_request *out=NULL; OK(cc_capture_dequeue(c,&out,100));
+        const cc_capture_result *result=cc_request_get_result(out);
+        if (fault==3) CHECK(result->status==CC_REQUEST_COMPLETE && result->native_photo.frames==4 &&
+            result->native_photo.temporal_resets==4);
+        else CHECK(result->status==CC_REQUEST_FAILED && result->error==
+            (fault==0 ? -ERANGE:fault==1 ? -ESTALE:fault==2 ? -ENODATA:-EIO));
+        OK(cc_capture_release(c,out)); cc_capture_close(c); OK(cc_request_destroy(r)); finished(&f);
+    }
+    c=native_graph(&f,0,2); OK(cc_request_create(85,&r));
+    options=(cc_native_photo_options){.features=3}; OK(cc_request_set_native_photo(r,&options));
+    ERROR(cc_capture_queue(c,r),ENOSPC);
+    options.features=CC_NATIVE_PHOTO_TDN; OK(cc_request_set_native_photo(r,&options));
+    OK(cc_capture_queue(c,r)); cc_request *out=NULL; OK(cc_capture_dequeue(c,&out,100));
+    CHECK(cc_request_get_result(out)->status==CC_REQUEST_COMPLETE);
+    OK(cc_capture_release(c,out)); cc_capture_close(c); OK(cc_request_destroy(r)); finished(&f);
+    static const uint32_t orders[]={V4L2_PIX_FMT_SRGGB16,V4L2_PIX_FMT_SGRBG16,V4L2_PIX_FMT_SGBRG16,V4L2_PIX_FMT_SBGGR16};
+    for (unsigned i=0; i<4; ++i) {
+        init(&f); f.pisp=true; cc_pisp_be *backend=open_be(&f,false);
+        cc_pisp_be_configuration config=be_configuration(V4L2_PIX_FMT_RGB24,0);
+        config.input.fourcc=orders[i];
+        OK(cc_pisp_be_configure_native_photo(backend,&config,3));
+        for (unsigned j=0; j<4; ++j) CHECK(config.auxiliary[j].format.fourcc==orders[i] &&
+            !config.auxiliary[j].compression_offset);
+        cc_pisp_be_close(backend); finished(&f);
+    }
+}
 static void test_photo_graph(void)
 {
     for (unsigned compression=0;compression<4;++compression) for (unsigned noir=0;noir<2;++noir) {
@@ -3641,6 +3818,10 @@ static void test_processed_roles(bool pisp)
 
 int main(int argc, char **argv)
 {
+    if ((argc==2 || argc==3) && !strcmp(argv[1],"native-photo")) {
+        if (argc==3) { proxy_worker=argv[2]; int ret=proxy_available(); if (ret==77) return ret; OK(ret); }
+        test_native_photo(); test_native_photo_failures(); return 0;
+    }
     if ((argc==2 || argc==3) && !strcmp(argv[1],"vc4-photo")) {
         if (argc==3) { proxy_worker=argv[2]; int ret=proxy_available(); if (ret==77) return ret; OK(ret); }
         test_vc4_photo_graph(); return 0;

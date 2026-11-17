@@ -64,7 +64,7 @@ remain private to that execution. Syntax validation is also available as
 | Contrast | Gamma contrast multiplier, 0..4 | 1, pivot at native value 32768 |
 | Saturation | Colour-matrix saturation multiplier, 0..2 | 1; 0 produces equal RGB rows |
 | Sharpness | Calibrated native strength multiplier, 0..4 | 1; 0 disables native sharpening |
-| Denoise | Off, normal | Normal enables calibrated spatial and colour NR; no automatic temporal history |
+| Denoise | Off, normal | Normal enables calibrated spatial and colour NR; native photo transactions can add temporal history |
 | Flicker | Lighting mains frequency: 0, 50, 60 Hz | Creation default (NULL options: 50 Hz); only automatic shutter is quantized to lighting half-cycles |
 | Frame durations | Minimum/maximum nanoseconds, both positive or both zero | Both zero select the physical mode bounds; blanking/exposure use the sensor-specific planner |
 
@@ -82,8 +82,9 @@ zero because grey-world does not estimate temperature.
 Image controls modify native gamma, CCM, sharpening and denoise blocks before
 processing. Metadata describes the normalized values used to construct those
 blocks; register coefficients and LUTs have native quantization and clipping.
-These controls do not introduce a software image-processing stage. HDR and
-temporal NR policies are outside this contract and are not advertised.
+These controls do not introduce a software image-processing stage.
+[Native PiSP transactions](NATIVE_PHOTO.md) add automatic TDN/HDR through
+`cc_request_set_native_photo`; graph capabilities advertise the available features.
 
 A request carrying photo controls requires a photo-capable IPA; queueing without
 one returns `-ENOTSUP`. Mode/live-limit checks happen at prepare, after acquire

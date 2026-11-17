@@ -271,6 +271,7 @@ exposure shifts are not invented. Decoded PDAF feeds the next eligible AF update
 Valid sensor HDR histograms supply linear luma with the reference's fourfold
 headroom factor for AE. Missing/malformed components fall back independently,
 without retaining old phase/HDR packets. The capture examples still default to
-contrast AF; embedded capture is an explicit native API configuration. Sensor
-HDR exposure policies/fusion, additional packet formats and physical validation
+contrast AF; embedded capture is an explicit native API configuration.
+[Native PiSP HDR brackets and fusion](NATIVE_PHOTO.md) coordinate successive
+exposures through the delayed sensor path. Additional packet formats and physical validation
 remain outstanding.

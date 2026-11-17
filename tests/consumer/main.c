@@ -45,6 +45,11 @@ int main(int argc, char **argv)
     cc_ipa *photo_ipa=NULL;
     if (cc_ipa_pisp_create(NULL,&photo_ipa)) return 1;
     cc_ipa_destroy(photo_ipa);
+    cc_request *native_request=NULL;
+    cc_native_photo_options native_options={.features=CC_NATIVE_PHOTO_TDN|CC_NATIVE_PHOTO_HDR};
+    if (cc_request_create(0,&native_request) || cc_request_set_native_photo(native_request,&native_options) ||
+        cc_request_set_native_photo(native_request,NULL) || cc_request_destroy(native_request) ||
+        cc_pisp_be_configure_native_photo(NULL,NULL,0)!=-EINVAL) return 1;
     if (argc == 2) {
         cc_ipa_proxy_options options = {.worker_path = argv[1]}; cc_ipa *installed_proxy = NULL;
         int ret = cc_ipa_vc4_create_proxy(NULL, &options, &installed_proxy);

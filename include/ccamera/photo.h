@@ -46,7 +46,8 @@ typedef struct cc_photo_controls {
 } cc_photo_controls;
 typedef struct cc_photo_range { double minimum, maximum, default_value; } cc_photo_range;
 enum cc_photo_capability_flags {
-    CC_PHOTO_CAP_AF = 1U, CC_PHOTO_CAP_PDAF = 2U, CC_PHOTO_CAP_PROVISIONAL_DELAYS = 4U
+    CC_PHOTO_CAP_AF = 1U, CC_PHOTO_CAP_PDAF = 2U, CC_PHOTO_CAP_PROVISIONAL_DELAYS = 4U,
+    CC_PHOTO_CAP_NATIVE_TDN = 8U, CC_PHOTO_CAP_NATIVE_HDR = 16U /* Capture graph capabilities. */
 };
 typedef struct cc_photo_capabilities {
     uint32_t controls, flags, metering_modes, white_balance_modes, denoise_modes;

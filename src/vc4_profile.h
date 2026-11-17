@@ -4,6 +4,16 @@
 #include <ccamera/vc4_tuning.h>
 #include <ccamera/af.h>
 struct cc_vc4_prior { double lux; const double *pwl; size_t count; };
+struct cc_pisp_denoise_profile {
+    double deviation, deviation2, strength, backoff, cdn_deviation, tdn_deviation, tdn_threshold;
+};
+struct cc_pisp_hdr_profile {
+    uint16_t threshold, detail_constant;
+    uint8_t diff_power;
+    double motion_threshold, detail_slope, iir_strength, strength;
+    double spatial_gain;
+    uint32_t diffusion;
+};
 struct cc_vc4_profile_data {
     cc_vc4_profile_info info;
     uint16_t black;
@@ -29,6 +39,8 @@ struct cc_vc4_profile_data {
     const double *metering[3]; /* centre, spot, matrix, in native region order. */
     double wb_modes[7][2]; /* auto, incandescent, tungsten, fluorescent, indoor, daylight, cloudy. */
     const cc_af_tuning *af;
+    struct cc_pisp_denoise_profile temporal[2]; /* normal, HDR */
+    struct cc_pisp_hdr_profile hdr;
 };
 const struct cc_vc4_profile_data *cc_vc4_profile_data(enum cc_vc4_profile profile);
 const struct cc_vc4_profile_data *cc_pisp_profile_data(enum cc_vc4_profile profile);

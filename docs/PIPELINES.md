@@ -248,8 +248,9 @@ noise constant/slope and threshold use native register units. STITCH requires
 an input; its native U0.15 exposure ratio maps long-exposure pixels to the short
 exposure's range, with the top bit selecting a long streaming input. Threshold
 separation is `1 << threshold_diff_power` (0..15). A zero motion reciprocal is
-finalized from its threshold. These are manual parameters, without automatic
-HDR policy or calibrated noise tuning.
+finalized from its threshold. These are manual parameters; the separate
+[native photo transaction](NATIVE_PHOTO.md) generates calibrated parameters and
+manages exposure sequences and history automatically.
 
 `cc_pisp_be_submit_with_auxiliary` takes TDN/STITCH source descriptors and frame
 metadata. Enabled sources must stay dequeued until grouped completion or
@@ -369,7 +370,7 @@ horizontal, 2 vertical, 3 both). The default output derives from **linear sensor
 with no automatic black level, white balance, colour correction or gamma;
 it is not a tuned sRGB photograph/video. Applications supplying manual processing
 must match their colour metadata to it. RGB/YUV input, additional native output
-layouts, owned-graph TDN/HDR history assignment, HOG output, richer tuning and
+layouts, HOG output, richer tuning and
 advanced automatic algorithms are pending. `-g` adds reference AE/AWB but
 does not select calibrated image tuning or gamma. The tests simulate queue/DMA ownership
 and inspect parameters; actual pixel processing and image quality require Pi 5

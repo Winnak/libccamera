@@ -23,6 +23,13 @@ CC_API int cc_pisp_select_profile(const cc_sensor_model *sensor, cc_rpi_profile 
 CC_API int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *geometry,
     double temperature, double analogue_gain, double red_gain, double blue_gain,
     struct pisp_fe_config *frontend, struct pisp_be_config *backend);
+enum cc_native_photo_features { CC_NATIVE_PHOTO_TDN=1U, CC_NATIVE_PHOTO_HDR=2U };
+/* Configure native history ports before buffer allocation. Uses lossless,
+ * MSB-aligned Bayer16 histories, independent of the main input packing.
+ * Existing auxiliary choices are replaced. Output unchanged on failure.
+ * HDR brackets use the sensor's image route at two delayed exposures. */
+CC_API int cc_pisp_be_configure_native_photo(cc_pisp_be *backend,
+    cc_pisp_be_configuration *configuration, uint32_t features);
 #ifdef __cplusplus
 }
 #endif

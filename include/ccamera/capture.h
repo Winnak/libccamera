@@ -37,6 +37,17 @@ enum cc_capture_stream {
 enum cc_capture_request_buffers {
     CC_CAPTURE_REQUEST_RAW = 1U, CC_CAPTURE_REQUEST_OUTPUT0 = 2U, CC_CAPTURE_REQUEST_OUTPUT1 = 4U
 };
+typedef struct cc_native_photo_options {
+    uint32_t features; /* CC_NATIVE_PHOTO_TDN/HDR, nonzero. PiSP only. */
+    uint32_t temporal_frames; /* 0 selects 4; otherwise 2..8. Per exposure channel. */
+    double hdr_ratio; /* Long/short exposure product: 0 selects 4; otherwise [2,8]. */
+} cc_native_photo_options;
+typedef struct cc_native_photo_status {
+    uint32_t features, frames, temporal_resets;
+    uint32_t first_sequence, last_sequence;
+    uint64_t short_exposure_ns, long_exposure_ns;
+    double analogue_gain, hdr_ratio; /* Expected driver-adjusted sensor values. */
+} cc_native_photo_status;
 typedef struct cc_capture_result {
     enum cc_request_status status;
     int error; /* 0, -ECANCELED, or a negative errno; ERROR buffer flags give -EIO. */
@@ -54,6 +65,7 @@ typedef struct cc_capture_result {
     cc_uvc_controls uvc; /* Optional acknowledged normalized UVC commands. */
     cc_frame frontend_image1; /* Optional independently cropped/scaled FE output. */
     cc_frame backend_auxiliary[4]; /* TDN input/output, STITCH input/output. Input data pointers are NULL. */
+    cc_native_photo_status native_photo; /* Automatic native transaction, zero for ordinary requests. */
 } cc_capture_result;
 
 /* Adopt configured, allocated, idle devices. Success clears *devices and
@@ -160,6 +172,18 @@ CC_API int cc_request_create(uint64_t cookie, cc_request **request);
 /* Returns -EBUSY while owned by a capture or referenced as another request's history. */
 CC_API int cc_request_destroy(cc_request *request);
 CC_API int cc_request_set_cookie(cc_request *request, uint64_t cookie);
+/* Automatic still transaction. Internally captures a bounded temporal sequence
+ * and/or a short/long bracket, coordinates delayed sensor writes, tunes native
+ * TDN/STITCH/tonemap and owns all intermediate buffers. Only the final image is
+ * delivered; RAW/statistics/IPA metadata describe its long exposure with HDR.
+ * NULL disables. Options are copied and persist on request reuse.
+ * Requires calibrated PiSP IPA, configured sensor delays, matching history ports
+ * and >=2 common slots (>=3 for combined TDN/HDR). No other request may be owned
+ * while this transaction is queued or its result held (-EBUSY). Native FE/BE
+ * overrides and manual history bindings are incompatible. A timeout preserves
+ * every stage; stop/error cancels the whole transaction. Every photograph starts
+ * fresh history. This is native ISP processing, with no CPU image merging. */
+CC_API int cc_request_set_native_photo(cc_request *request, const cc_native_photo_options *options);
 /* Bind a raw source to a request's TDN_INPUT or STITCH_INPUT. A source request
  * must hold a COMPLETE, delivered result from this capture graph. RAW,
  * FRONTEND_IMAGE1, TDN_OUTPUT and STITCH_OUTPUT are valid source streams.

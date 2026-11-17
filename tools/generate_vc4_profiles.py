@@ -144,6 +144,25 @@ def generate(pipeline="vc4"):
             "lux_reference": a["rpi.lux"]["reference_lux"],
         }
         fields.update({k: str(v) for k, v in scalars.items()})
+        if pisp:
+            temporal = []
+            for mode in ("normal", "hdr"):
+                denoise = a["rpi.denoise"][mode]
+                s, c, t = (denoise[k] for k in ("sdn", "cdn", "tdn"))
+                values = [s.get("deviation", 3.2), s.get("deviation2", s.get("deviation", 3.2)),
+                          s.get("strength", 0.25), s.get("backoff", 0.75),
+                          c.get("deviation_with_tdn", c.get("deviation_no_tdn", c.get("deviation", 150)) / 3),
+                          t.get("deviation", 0.5), t.get("threshold", 0.75)]
+                temporal.append("{" + ",".join(str(v) for v in values) + "}")
+            fields["temporal"] = "{" + ",".join(temporal) + "}"
+            h = a["rpi.hdr"]["MultiExposure"]
+            assert h["cadence"] == [1, 2] and h["stitch_enable"] == h["tonemap_enable"] == 1
+            assert "spatial_gain_curve" not in h
+            values = [h.get("threshold_lo", 50000), h.get("detail_constant", 0), h.get("diff_power", 13),
+                      h.get("motion_threshold", 0.005), h.get("detail_slope", 0),
+                      h.get("iir_strength", 8), h.get("strength", 1.5), h.get("spatial_gain", 1),
+                      min(h.get("diffusion", 3), 15)]
+            fields["hdr"] = "{" + ",".join(str(v) for v in values) + "}"
         flags = (1 if "noir" in name else 0) | (2 if "wide" in name else 0) | (4 if name.startswith("imx477") else 0)
         entries.append("    {\n        .info = {CC_VC4_PROFILE_" + name.upper() +
                        f', "{name}", "{name.split("_")[0]}", "{name}-{pipeline}-{digest[:12]}-calibration-v1", {flags}' + "},\n" +

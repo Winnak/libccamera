@@ -33,7 +33,9 @@ including explicit NoIR/wide variants. A separate calibrated
 [PiSP single-exposure path](docs/TUNING.md#pi-5-cfepisp-photo-path) covers the same
 modules on Pi 5 in software. Both share [photographic controls and metadata](docs/PHOTO_CONTROLS.md)
 with capability queries, manual/automatic exposure and gain, EV/metering, WB,
-native image adjustments and calibrated opt-in V3 AF/PDAF. Physical photo acceptance and advanced algorithms
+native image adjustments and calibrated opt-in V3 AF/PDAF. PiSP also supports
+[automatic native temporal denoise and HDR still transactions](docs/NATIVE_PHOTO.md),
+including delayed exposure brackets and internal history ownership. Physical photo acceptance and advanced algorithms
 remain pending.
 
 Native [IPC transport](docs/IPC.md) provides reference-compatible datagram and

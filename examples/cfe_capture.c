@@ -70,7 +70,7 @@ static void print_format(const char *name, const cc_format *format)
 static void usage(const char *program)
 {
     fprintf(stderr, "Usage: %s [-c index | -I ID] -w width -h height -f FOURCC\n"
-            "          [-n frames] [-o bayer.raw] [-s statistics.bin] [-g] [-j] [-q PROFILE]\n"
+            "          [-n frames] [-o bayer.raw] [-s statistics.bin] [-g] [-j] [-q PROFILE] [-D tdn|hdr|both]\n"
             "          [-b FE-FOURCC] [-k compression-black-level-offset]\n"
             "          [-p [-i /dev/mediaN] [-F FOURCC] [-A FOURCC] [-a auxiliary.raw]]\n"
             "          [-W width -H height] [-U aux-width -V aux-height]\n"
@@ -86,6 +86,7 @@ static void usage(const char *program)
             "-g adds reference automatic exposure, and white balance with -p.\n"
             "-q auto/NAME adds calibrated PiSP photo processing and AE/AWB (implies -p);\n"
             "use a module name from ccamera-still --list-profiles; excludes -g/-j.\n"
+            "-D adds automatic native temporal/HDR still sequences (implies -q auto).\n"
             "-j adds the standard V3/IMX708 continuous autofocus profile (opt-in).\n"
             "Transforms: 0 none, 1 horizontal flip, 2 vertical flip, 3 both.\n",
             program);
@@ -96,6 +97,7 @@ int main(int argc, char **argv)
     uint32_t index = 0, frames = 10;
     bool process = false, auxiliary = false, automatic = false, autofocus = false, calibrated = false;
     cc_ipa_pisp_options photo={.mains_hz=50};
+    cc_native_photo_options native={0};
     bool index_selected=false;
     cc_cfe_configuration configuration = {0};
     cc_format output_format = { .fourcc = CC_FOURCC('R', 'G', 'B', '3') };
@@ -104,7 +106,7 @@ int main(int argc, char **argv)
     uint32_t transforms[2] = {0};
     const char *output_path = NULL, *statistics_path = NULL, *be_path = NULL, *auxiliary_path = NULL, *camera_id=NULL;
     int option;
-    while ((option = getopt(argc, argv, "pgjq:c:I:w:h:f:b:k:n:o:s:i:F:A:a:W:H:U:V:r:R:t:T:")) != -1) {
+    while ((option = getopt(argc, argv, "pgjq:D:c:I:w:h:f:b:k:n:o:s:i:F:A:a:W:H:U:V:r:R:t:T:")) != -1) {
         int ret = 0;
         switch (option) {
         case 'c': index_selected=true; ret = number(optarg, &index); break;
@@ -121,6 +123,12 @@ int main(int argc, char **argv)
         case 'q':
             process=calibrated=true;
             ret=!strcmp(optarg,"auto") ? (photo.profile=CC_VC4_PROFILE_AUTO,0) : cc_vc4_lookup_profile(optarg,&photo.profile);
+            break;
+        case 'D':
+            process=calibrated=true;
+            native.features=!strcmp(optarg,"tdn") ? CC_NATIVE_PHOTO_TDN :
+                !strcmp(optarg,"hdr") ? CC_NATIVE_PHOTO_HDR : !strcmp(optarg,"both") ? 3U:0U;
+            if (!native.features) ret=-EINVAL;
             break;
         case 'i': process = true; be_path = optarg; break;
         case 'a': process = auxiliary = true; auxiliary_path = optarg; break;
@@ -212,7 +220,7 @@ int main(int argc, char **argv)
             .compression_offset = configuration.compression_offset,
             .output1 = auxiliary ? auxiliary_format : (cc_format) {0},
             .crop = {crops[0], crops[1]}, .transform = {transforms[0], transforms[1]} };
-        ret = cc_pisp_be_configure(be, &c);
+        ret = native.features ? cc_pisp_be_configure_native_photo(be,&c,native.features):cc_pisp_be_configure(be, &c);
         if (ret < 0) goto done;
         print_format("BE output0", &c.output);
         fprintf(stderr, "  crop=%d,%d/%ux%u transform=%u\n", c.crop[0].x, c.crop[0].y,
@@ -260,10 +268,12 @@ int main(int argc, char **argv)
         if (ret < 0) goto done;
     }
     if (request_count > frames) request_count = frames;
+    if (native.features) request_count=1;
     requests = calloc(request_count, sizeof(*requests));
     if (!requests) { ret = -ENOMEM; goto done; }
     for (uint32_t i = 0; i < request_count; ++i) {
         ret = cc_request_create(i, &requests[i]);
+        if (ret>=0 && native.features) ret=cc_request_set_native_photo(requests[i],&native);
         if (ret>=0 && autofocus) {
             cc_af_controls af={.flags=CC_AF_SET_MODE,.mode=CC_AF_CONTINUOUS};
             ret=cc_request_set_af_controls(requests[i],&af);
@@ -301,6 +311,10 @@ int main(int argc, char **argv)
                     result->ipa.analogue_gain,result->ipa.luminance);
         if (result->ipa.flags & CC_IPA_METADATA_AWB)
             fprintf(stderr,"  white-balance red=%.3f blue=%.3f\n",result->ipa.red_gain,result->ipa.blue_gain);
+        if (result->native_photo.features)
+            fprintf(stderr,"  native frames=%u resets=%u short=%" PRIu64 "ns long=%" PRIu64 "ns HDR-ratio=%.3f\n",
+                result->native_photo.frames,result->native_photo.temporal_resets,result->native_photo.short_exposure_ns,
+                result->native_photo.long_exposure_ns,result->native_photo.hdr_ratio);
         if (result->ipa.flags & CC_IPA_METADATA_AF)
             fprintf(stderr,"  autofocus state=%u lens=%d position=%.3f dioptres\n",(unsigned int)result->ipa.af.state,
                 result->ipa.af.lens_setting,result->ipa.af.lens_position);
