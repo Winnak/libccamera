@@ -100,8 +100,15 @@ Simulated jobs verify revision discovery and reject bad tuning before importing
 source buffers. Request tests cover ownership transfer, FIFO queues, held-slot
 backpressure, tuning/control snapshots, overlapping capture and ISP processing,
 partial completion polling, deadlines across both stages, malformed completions,
-and cancellation/forced close before source memory is freed. Delayed-control
-tests compare 2,000 frames against an independent model and check priority and
+and cancellation/forced close before source memory is freed. Reuse tests
+cycle 128 requests through raw/CFE and VC4/PiSP graphs, checking fresh pixels
+on processed paths and tracking native mappings and descriptors through close.
+Role tests free the old pools, apply a new processed size and capture in the
+new layout. Simulated removal and reopening of one graph leave another graph's
+held result usable.
+
+Delayed-control tests exercise SOF-only polling when no request can make
+progress. They compare 2,000 frames against an independent model and check priority and
 adjusted scalar/64-bit writes, sequence wrap/history expiry, SOF polling, held
 metadata, missed events/write deadlines, partial failure and restart on both
 Unicam and CFE sources. Sensor-helper tests check native gain-code round trips,

@@ -1006,7 +1006,6 @@ void cc_capture_close(cc_capture *c)
 
 int cc_capture_queue(cc_capture *c, cc_request *r)
 {
-    if (c && r && r->have_vc4 && !c->devices.vc4) return -ENOTSUP;
     if (!c || !r) return -EINVAL;
     if (r->owner) return -EBUSY;
     if (c->native_request) return -EBUSY;
@@ -1028,7 +1027,8 @@ int cc_capture_queue(cc_capture *c, cc_request *r)
             if (cc_request_buffer_overlaps(buffer, &owned->buffers[i])) return -EBUSY;
     }
     if ((r->have_fe && !c->devices.frontend) || (r->have_be && !c->devices.backend) ||
-        (r->num_controls && !c->devices.vc4) || (r->have_af && !(cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_LENS)) ||
+        ((r->have_vc4 || r->num_controls) && !c->devices.vc4) ||
+        (r->have_af && !(cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_LENS)) ||
         (r->have_photo && !(cc_ipa_get_capabilities(c->ipa) & CC_IPA_CAP_PHOTO))) return -ENOTSUP;
     if (r->vimc_controls.flags && (!c->devices.camera ||
         c->devices.camera->info.pipeline != CC_PIPELINE_VIMC)) return -ENOTSUP;
@@ -1571,7 +1571,9 @@ static int captured(cc_capture *c, cc_request *r)
     uint32_t mistrust=c->policy_mode_switch ? c->policy.mistrust_mode_switch:c->policy.mistrust_startup;
     uint32_t hide=c->policy_mode_switch ? c->policy.hide_mode_switch:c->policy.hide_startup;
     r->result.untrusted=age<mistrust;
-    if ((age<hide || (r->native && age<mistrust)) && !(r->result.raw.flags & V4L2_BUF_FLAG_ERROR)) {
+    uint32_t source_flags = r->result.raw.flags | r->result.statistics.flags | r->result.frontend_parameters.flags |
+        r->result.embedded.flags | r->result.frontend_image1.flags;
+    if ((age<hide || (r->native && age<mistrust)) && !(source_flags & V4L2_BUF_FLAG_ERROR)) {
         int released=c->devices.frontend ? cc_cfe_release(c->devices.frontend,r->slot):0;
         if (released<0) return released;
         r->result.raw=(cc_frame){0};r->result.statistics=(cc_frame){0};
@@ -1583,8 +1585,6 @@ static int captured(cc_capture *c, cc_request *r)
         ret = cc_delayed_get(c->delayed, r->result.raw.sequence, &r->result.sensor);
         if (ret < 0) return ret;
     }
-    uint32_t source_flags = r->result.raw.flags | r->result.statistics.flags | r->result.frontend_parameters.flags |
-        r->result.embedded.flags | r->result.frontend_image1.flags;
     if (effective(r)->num_sensor_controls && !(source_flags & V4L2_BUF_FLAG_ERROR)) {
         if (r->result.raw.sequence - r->sensor_target > INT32_MAX) {
             /* This frame precedes the controls' effective frame. Recycle only
@@ -1804,7 +1804,7 @@ int cc_capture_pollfds(const cc_capture *c, struct pollfd *fds, size_t *count)
             else pending[n++] = (struct pollfd) {fd, POLLPRI, 0};
         }
     }
-    size_t capacity = *count;
+    size_t capacity = fds ? *count : 0;
     *count = n;
     if (fds && capacity < n) return -ENOSPC;
     if (fds) memcpy(fds, pending, n * sizeof(*fds));
@@ -1858,7 +1858,11 @@ int cc_capture_dequeue(cc_capture *c, cc_request **out, int timeout_ms)
         size_t n = CC_CAPTURE_MAX_FDS;
         ret = cc_capture_pollfds(c, fds, &n);
         if (ret < 0) { halt(c, NULL, ret); continue; }
-        if (!n) return -EAGAIN;
+        /* A SOF-only fd can service explicit control schedules, but cannot
+         * produce a request completion while there is no active image job or
+         * fence to wait for. Keep it available to external poll loops. */
+        if (!n || (n == 1 && fds[0].events == POLLPRI && !c->capturing && !c->processing))
+            return -EAGAIN;
         int remaining = -1;
         if (timeout_ms > 0) {
             uint64_t now;

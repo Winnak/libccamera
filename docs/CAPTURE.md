@@ -9,6 +9,7 @@
 - [Sensor mode selection](#sensor-mode-selection)
 - [Frame intervals](#frame-intervals)
 - [Capture requests](#capture-requests)
+- [Restart and recovery](#restart-and-recovery)
 - [Raspberry Pi raw capture](#raspberry-pi-raw-capture)
 
 ## Capture and ownership
@@ -108,7 +109,10 @@ passed through unchanged as well.
 
 Dequeuing transfers buffer ownership to the caller. Its mapping remains valid
 until the buffer is requeued, freed, or the camera is closed. A previously saved
-pointer must not be accessed while its buffer is queued. DMA-BUF export returns
+pointer must not be accessed while its buffer is queued. A successful stop
+returns queued slots and clears their completion metadata. Mappings and imports
+remain available for reuse. The previous pixels can still be in memory, so
+wait for a new dequeue before treating an idle slot as a new frame. DMA-BUF export returns
 a new fd owned by the caller; close all exported fds before freeing buffers. If
 `free_buffers` fails with `-EBUSY` due to outstanding exports, mappings have
 already been removed: close the exports and retry `free_buffers`.
@@ -120,7 +124,9 @@ succeeds. Dequeued imported planes have `data == NULL` and expose their lengths
 and payload metadata. CPU mapping and DMA-BUF CPU cache synchronization are the
 caller's responsibility for these buffers.
 
-Functions return zero or a negative errno, except exported fds and borrowed fds.
+Most operations return zero or a negative errno. Check the return value
+directly and use `strerror(-ret)` for negative errors. Functions documented to
+return an fd or a status can return nonnegative values other than zero.
 Enumeration ends with `-ENOENT`. Nonblocking dequeue returns `-EAGAIN`; a bounded
 wait can return `-ETIMEDOUT`. Keep the V4L2 timestamp flags when interpreting the
 timestamp's clock and source, and inspect `V4L2_BUF_FLAG_ERROR` before using a
@@ -763,6 +769,17 @@ before queueing it again. Destroying an owned request returns `-EBUSY`.
 Stop/close invalidates all views, including previously delivered ones. Closing
 the graph detaches requests but leaves their objects owned by the caller.
 
+The result and its plane mappings are borrowed. Read an optional frame only
+when its `num_planes` is nonzero. The valid bytes start at `data + data_offset`
+and span `bytes_used - data_offset` bytes. Use the negotiated format for strides,
+sizes and colour interpretation. A shallow copy of the result still borrows
+its plane mappings. Copy any pixels needed beyond the lifetime of the result.
+`result.sequence` starts at zero for each graph and keeps increasing across
+stops. `result.raw.sequence` and timestamp flags come from the source driver.
+The caller-supplied cookie identifies the request, and the separately reported
+sensor controls describe the expected effective settings for the frame. See
+[photographic metadata](PHOTO_CONTROLS.md).
+
 Requests can select external image storage independently for the source, main
 output and auxiliary output. Allocate those image queues as `CC_MEMORY_DMABUF`:
 use `cc_camera_prepare_imports`, `cc_cfe_allocate_buffers_with_memory`, or the
@@ -818,24 +835,55 @@ out remaining active fences; callers must service their loop promptly. The
 blocking dequeue combines that deadline with its caller-supplied timeout.
 Acquire fences do not provide CPU cache synchronization or release/out fences.
 
-Timeouts cover the entire capture/processing operation and retain pending work.
-When no device can advance because slots are held, dequeue returns `-EAGAIN`.
+Dequeue deadlines cover time spent waiting for capture and processing and
+retain pending work. When held slots prevent progress, dequeue returns
+`-EAGAIN` even with an indefinite timeout. Sensor-only events remain available
+to an external event loop for control scheduling.
 For an external event loop, dispatch nonblocking work, query
 `cc_capture_pollfds`, poll those borrowed descriptors, and dispatch again.
 Descriptors include only unfinished ports and specify POLLIN/POLLOUT as needed.
 The library's blocking dequeue uses the same poll set and handles interrupted
-waits. Exported raw/output/statistics plane fds are caller-owned; finish
-downstream DMA before release/stop/close, and close exports before destroying
-the graph. Encoding remains the application's choice.
+waits. Exported raw/output/statistics plane fds are caller-owned. Close exports
+before destroying the graph. Encoding remains the application's choice.
 
-Arbitrary device graphs, concurrent jobs
-within each controller, media requests, mode-specific sensor overrides and advanced automatic
-image algorithms are still pending. Tests cover raw/CFE request capture,
-camera-to-VC4/BE chains and combined CFE-to-BE automatic exposure/WB feedback.
-The combined path includes independent delayed sensor/scene models, held buffer
-backpressure, overlapping capture/processing, copied FE/BE overrides, restart
-and cancellation after statistics/device failures. Physical capture, actual
-pixel processing and image quality still need hardware validation.
+Complete any external DMA and CPU accesses before releasing a result or
+stopping the graph. For an application mapping an imported or exported
+DMA-BUF, bracket each CPU access with `DMA_BUF_IOCTL_SYNC` START and END
+using the appropriate READ/WRITE flags, and handle the kernel's retryable
+errors. Cache synchronization and waiting for other DMA users are separate
+operations. Use the library's V4L2 MMAP views directly while the result is held.
+See the [kernel DMA-BUF contract](https://docs.kernel.org/driver-api/dma-buf.html).
+
+## Restart and recovery
+
+Serialize all operations on the same graph, its adopted devices and its
+requests, including operations from an event loop. Budget a buffer slot for
+each result held for a downstream consumer. The number of allocated slots
+returned by `cc_capture_create` is separate from the 256-request ownership limit.
+
+| Outcome | Ownership and next operation |
+| --- | --- |
+| Queue returns a negative error | The graph has not accepted the request. Correct the reported issue and retry. `-ENOSPC` means the graph already owns the maximum number of requests. |
+| Dequeue returns `-EAGAIN` or `-ETIMEDOUT` | The output pointer is unchanged. Release a held result when slots are full, or retry the wait for pending work. |
+| Dequeue returns zero | Inspect the delivered request's status and error. A failed driver buffer can hold views and still needs release. Acquire-fence cancellation affects only its request. |
+| Dispatch or dequeue reports a fatal graph error | The graph cancels outstanding work and invalidates all frame views. Dequeue any undelivered completions and release delivered requests. Dequeue reports the graph error after those completions have been drained. Call stop and check its return before reusing the graph. |
+| Stop returns zero | Undelivered cancellations can be dequeued once, and previously delivered requests can be released directly. Requeue released requests and drive dispatch/dequeue to restart. Delayed sensor plans are cleared. Request controls, tuning and buffer assignments persist. |
+| Stop returns a negative error | Native devices have been closed. Drain and release as needed, or close the graph to detach all requests. Rediscover or reopen the devices and create a new graph. |
+
+For low-level queues, stop, close outstanding exports, and free all affected
+buffers before changing an active format or layout. Apply the new configuration,
+allocate fresh pools, and use the newly negotiated layouts. If an active
+configuration change partially fails, apply a complete configuration again
+before allocating. Use [read-only validation](#read-only-pipeline-validation)
+to probe formats while running. For an adopted graph, finish external accesses,
+close it, and configure and adopt newly opened devices. Detached request
+objects can be reused here if their settings and buffer capacities match the
+new graph.
+
+For device removal, close the failed graph and rediscover the camera using
+[camera identities](#camera-identities) or the [hotplug monitor](#camera-hotplug).
+An existing graph does not reconnect itself. See [current support](../README.md#current-support)
+for hardware coverage.
 
 ## Raspberry Pi raw capture
 

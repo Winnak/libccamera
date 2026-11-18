@@ -1,17 +1,22 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include <ccamera/capture.h>
 #include <ccamera/configuration.h>
+#include <dirent.h>
 #include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <linux/dma-buf.h>
 #include <linux/media-bus-format.h>
 #include <linux/videodev2.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/utsname.h>
 #include <time.h>
+#include <unistd.h>
 
 struct row {
     uint32_t sequence, flags;
@@ -145,11 +150,220 @@ static int metadata(const char *path, const struct row *rows, size_t n, const cc
         ret = -EIO;
     return ret;
 }
+static int open_fds(void)
+{
+    DIR *dir = opendir("/proc/self/fd");
+    if (!dir)
+        return -errno;
+    int count = 0;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dir)))
+        if (entry->d_name[0] != '.')
+            ++count;
+    int ret = errno ? -errno : count;
+    if (closedir(dir) && ret >= 0)
+        ret = -errno;
+    return ret;
+}
+static uint64_t sample(const unsigned char *data, size_t size)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < size; i += 1021)
+        hash = (hash ^ data[i]) * UINT64_C(1099511628211);
+    return (hash ^ data[size - 1]) * UINT64_C(1099511628211);
+}
+static int sync_read(int fd, uint64_t phase)
+{
+    struct dma_buf_sync sync = {.flags = phase | DMA_BUF_SYNC_READ};
+    int ret;
+    do {
+        ret = ioctl(fd, DMA_BUF_IOCTL_SYNC, &sync);
+    } while (ret < 0 && (errno == EINTR || errno == EAGAIN));
+    return ret < 0 ? -errno : 0;
+}
+static int check_export(cc_capture *capture, const cc_request *request, enum cc_capture_stream stream,
+                        const cc_plane *plane, uint64_t expected)
+{
+    int fd = cc_capture_export_plane(capture, request, stream, 0);
+    if (fd < 0)
+        return fd;
+    const unsigned char *map = mmap(NULL, plane->length, PROT_READ, MAP_SHARED, fd, 0);
+    int ret = map == MAP_FAILED ? -errno : sync_read(fd, DMA_BUF_SYNC_START);
+    if (!ret) {
+        uint64_t hash = sample(map + plane->data_offset, plane->bytes_used - plane->data_offset);
+        ret = sync_read(fd, DMA_BUF_SYNC_END);
+        if (!ret && hash != expected)
+            ret = -EIO;
+    }
+    if (map != MAP_FAILED && munmap((void *)map, plane->length) && !ret)
+        ret = -errno;
+    if (close(fd) && !ret)
+        ret = -errno;
+    return ret;
+}
+static int repeat_result(cc_capture *capture, cc_request *request, uint64_t sequence, uint64_t *timestamp,
+                         bool export_images, uint64_t hashes[2], FILE *log)
+{
+    const cc_capture_result *r = cc_request_get_result(request);
+    if (r && r->error)
+        return r->error;
+    if (!r || r->status != CC_REQUEST_COMPLETE || r->sequence != sequence || r->cookie != sequence + 1 ||
+        r->raw.timestamp_ns <= *timestamp || !r->sensor.count || r->sensor.frame_sequence != r->raw.sequence)
+        return -EPROTO;
+    const cc_frame *images[] = {&r->raw, &r->output[0]};
+    const enum cc_capture_stream streams[] = {CC_CAPTURE_RAW, CC_CAPTURE_OUTPUT0};
+    for (size_t i = 0; i < 2; ++i) {
+        const cc_plane *p = &images[i]->planes[0];
+        if (images[i]->num_planes != 1 || !p->data || p->data_offset >= p->bytes_used || p->bytes_used > p->length)
+            return -EPROTO;
+        hashes[i] = sample((const unsigned char *)p->data + p->data_offset, p->bytes_used - p->data_offset);
+        if (export_images) {
+            int ret = check_export(capture, request, streams[i], p, hashes[i]);
+            if (ret < 0)
+                return ret;
+        }
+    }
+    *timestamp = r->raw.timestamp_ns;
+    if (!log)
+        return 0;
+    return fprintf(log, "{\"type\":\"frame\",\"request\":%" PRIu64 ",\"cookie\":%" PRIu64 ",\"sensor_sequence\":%u,"
+                        "\"sensor_cookie\":%" PRIu64 ",\"exposure_ns\":%" PRIu64 ",\"analogue_gain\":%.6g,"
+                        "\"raw_ns\":%" PRIu64 ",\"rgb_ns\":%" PRIu64 ",\"raw_sample\":\"%016" PRIx64
+                        "\",\"rgb_sample\":\"%016" PRIx64 "\",\"dma_checked\":%s}\n",
+                   sequence, r->cookie, r->raw.sequence, r->sensor.cookie, r->ipa.exposure_ns, r->ipa.analogue_gain,
+                   *timestamp, r->output[0].timestamp_ns, hashes[0], hashes[1],
+                   export_images ? "true" : "false") < 0 ? -EIO : 0;
+}
+static int repeat_check(cc_capture **graph, uint32_t slots, uint32_t frames, int timeout,
+                        const cc_control *manual, size_t num_manual, FILE *log)
+{
+    cc_request *requests[256] = {0}, *completed = NULL;
+    if (!slots || slots >= sizeof(requests) / sizeof(requests[0]))
+        return -ENOSPC;
+    cc_capture *capture = *graph;
+    uint64_t timestamp = 0, held[2] = {0}, hashes[2];
+    int ret = 0;
+    const char *step = "holding all capture slots";
+    for (uint32_t i = 0; i <= slots; ++i) {
+        ret = cc_request_create(i + 1, &requests[i]);
+        if (!ret)
+            ret = cc_request_set_sensor_controls(requests[i], manual, num_manual);
+        if (!ret)
+            ret = cc_capture_queue(capture, requests[i]);
+        if (ret < 0)
+            goto end;
+    }
+    if (cc_capture_queue(capture, requests[0]) != -EBUSY) {
+        ret = -EPROTO;
+        goto end;
+    }
+    ret = cc_capture_dequeue(capture, &completed, 1);
+    bool timed_out = ret == -ETIMEDOUT;
+    if (timed_out && (completed || cc_request_get_status(requests[0]) != CC_REQUEST_PENDING)) {
+        ret = -EPROTO;
+        goto end;
+    }
+    if (ret < 0 && !timed_out)
+        goto end;
+    for (uint32_t i = 0; i < slots; ++i) {
+        if (i || timed_out)
+            ret = cc_capture_dequeue(capture, &completed, timeout);
+        if (ret < 0 || completed != requests[i]) {
+            if (!ret)
+                ret = -EPROTO;
+            goto end;
+        }
+        ret = repeat_result(capture, completed, i, &timestamp, !i, i ? hashes : held, log);
+        if (ret < 0)
+            goto end;
+    }
+    if (cc_capture_dequeue(capture, &completed, timeout) != -EAGAIN || completed != requests[slots - 1] ||
+        cc_request_get_status(requests[slots]) != CC_REQUEST_PENDING) {
+        ret = -EPROTO;
+        goto end;
+    }
+    const cc_capture_result *first = cc_request_get_result(requests[0]);
+    uint64_t before = 0;
+    ret = repeat_result(capture, requests[0], 0, &before, false, hashes, NULL);
+    if (ret < 0 || memcmp(held, hashes, sizeof(held))) {
+        if (!ret)
+            ret = -EIO;
+        goto end;
+    }
+    step = "stopping with outstanding requests";
+    ret = cc_capture_stop(capture);
+    if (ret < 0)
+        goto end;
+    ret = cc_capture_dequeue(capture, &completed, 0);
+    if (ret < 0 || completed != requests[slots] || first->raw.num_planes || first->output[0].num_planes) {
+        if (!ret)
+            ret = -EPROTO;
+        goto end;
+    }
+    for (uint32_t i = 0; i <= slots; ++i) {
+        const cc_capture_result *r = cc_request_get_result(requests[i]);
+        if (!r || r->status != CC_REQUEST_CANCELLED || r->error != -ECANCELED) {
+            ret = -EPROTO;
+            goto end;
+        }
+        ret = cc_capture_release(capture, requests[i]);
+        if (ret < 0)
+            goto end;
+    }
+    if (fprintf(log, "{\"type\":\"held_and_stopped\",\"slots\":%u,\"short_wait_timed_out\":%s}\n",
+                slots, timed_out ? "true" : "false") < 0) {
+        ret = -EIO;
+        goto end;
+    }
+    step = "reusing the request after stop";
+    int steady_fds = open_fds();
+    if (steady_fds < 0) {
+        ret = steady_fds;
+        goto end;
+    }
+    for (uint32_t i = 0; i < frames; ++i) {
+        uint64_t sequence = (uint64_t)slots + 1 + i;
+        ret = cc_request_set_cookie(requests[0], sequence + 1);
+        if (!ret)
+            ret = cc_capture_queue(capture, requests[0]);
+        if (!ret)
+            ret = cc_capture_dequeue(capture, &completed, timeout);
+        if (!ret)
+            ret = completed == requests[0] ?
+                repeat_result(capture, completed, sequence, &timestamp, !(i % 32), hashes, log) : -EPROTO;
+        if (!ret)
+            ret = cc_capture_release(capture, completed);
+        if (ret < 0)
+            goto end;
+        if (i % 32 == 31 || i + 1 == frames) {
+            ret = cc_capture_stop(capture);
+            if (ret < 0)
+                goto end;
+            int fds = open_fds();
+            if (fprintf(log, "{\"type\":\"restart\",\"sustained_frames\":%u,\"open_fds\":%d}\n", i + 1, fds) < 0)
+                ret = -EIO;
+            else if (fds != steady_fds)
+                ret = fds < 0 ? fds : -EIO;
+            if (ret < 0)
+                goto end;
+        }
+    }
+end:
+    if (ret < 0)
+        fprintf(stderr, "Repeat check failed while %s: %s\n", step, strerror(-ret));
+    cc_capture_close(capture);
+    *graph = NULL;
+    for (uint32_t i = 0; i <= slots; ++i)
+        cc_request_destroy(requests[i]);
+    return ret;
+}
 static void usage(void)
 {
     puts("ccamera-still [-c INDEX | -I ID] [-o photo.ppm] [--metadata run.jsonl] [--raw frame.raw]\n"
          "  [--statistics frame.bsta] [--flicker off|50|60] [--timeout-ms 10000]\n"
          "  [--shutter-us N] [--gain-code N] [--colour-gains R,B] [--profile NAME]\n"
+         "  [--size WIDTHxHEIGHT] [--repeat-check COUNT --metadata repeat.jsonl]\n"
          "  [--list-profiles]\n"
          "  [--exposure-delay N] [--gain-delay N] [--vblank-delay N] [--hblank-delay N]\n"
          "  [--diagnostic exposure|gain|vblank --frames 96]\n"
@@ -162,7 +376,7 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     enum { FLICKER = 256, TIMEOUT, SHUTTER, GAIN, WB, ED, GD, VD, HD, META, RAW, STATS, DIAG, FRAMES,
-           PROFILE, LIST_PROFILES, HELP };
+           PROFILE, LIST_PROFILES, SIZE, REPEAT, HELP };
     const struct option opts[] = {{"flicker", 1, 0, FLICKER},
                                   {"camera-id", 1, 0, 'I'},
                                   {"timeout-ms", 1, 0, TIMEOUT},
@@ -179,13 +393,16 @@ int main(int argc, char **argv)
                                   {"diagnostic", 1, 0, DIAG},
                                   {"frames", 1, 0, FRAMES},
                                   {"profile", 1, 0, PROFILE},
+                                  {"size", 1, 0, SIZE},
+                                  {"repeat-check", 1, 0, REPEAT},
                                   {"list-profiles", 0, 0, LIST_PROFILES},
                                   {"help", 0, 0, HELP},
                                   {0, 0, 0, 0}};
     uint32_t index = 0, timeout = 10000, shutter = 0, gain = 0, delays[4] = {2, 2, 2, 2}, frames = 96;
+    uint32_t output_width = 0, output_height = 0, repeat = 0;
     cc_ipa_vc4_options tuning = {.mains_hz = 50};
     bool delay_override[4] = {false};
-    bool index_selected=false, gain_selected=false;
+    bool index_selected=false, gain_selected=false, output_selected=false;
     const char *output = "photo.ppm", *meta = "capture.jsonl", *raw_path = NULL, *stats_path = NULL,
                *diagnostic = NULL, *camera_id=NULL;
     int opt, ret = 0;
@@ -198,6 +415,7 @@ int main(int argc, char **argv)
         case 'I': camera_id=optarg; break;
         case 'o':
             output = optarg;
+            output_selected = true;
             break;
         case FLICKER:
             ret = !strcmp(optarg, "off") ? (tuning.mains_hz = 0, 0) : number(optarg, &tuning.mains_hz);
@@ -249,6 +467,17 @@ int main(int argc, char **argv)
         case FRAMES:
             ret = number(optarg, &frames);
             break;
+        case SIZE: {
+            char extra;
+            ret = sscanf(optarg, "%5ux%5u%c", &output_width, &output_height, &extra) == 2 &&
+                output_width && output_height ? 0 : -EINVAL;
+            break;
+        }
+        case REPEAT:
+            ret = number(optarg, &repeat);
+            if (!ret && !repeat)
+                ret = -EINVAL;
+            break;
         case HELP:
         case 'h':
             usage();
@@ -264,6 +493,7 @@ int main(int argc, char **argv)
     }
     if (optind != argc || (camera_id && (index_selected || !camera_id[0] ||
         strnlen(camera_id,CC_CAMERA_ID_MAX)==CC_CAMERA_ID_MAX)) || !timeout || timeout > 3600000 || frames < 32 || frames > 256 ||
+        (repeat && (diagnostic || output_selected || raw_path || stats_path)) ||
         (diagnostic && strcmp(diagnostic, "exposure") && strcmp(diagnostic, "gain") &&
          strcmp(diagnostic, "vblank"))) {
         usage();
@@ -281,7 +511,7 @@ int main(int argc, char **argv)
             usage();
             return 1;
         }
-    const char *paths[] = {diagnostic ? NULL : output, meta, raw_path, stats_path};
+    const char *paths[] = {diagnostic || repeat ? NULL : output, meta, raw_path, stats_path};
     for (unsigned i = 0; i < 4; ++i)
         for (unsigned j = 0; j < i; ++j)
             if (paths[i] && paths[j] && !strcmp(paths[i], paths[j])) {
@@ -307,6 +537,20 @@ int main(int argc, char **argv)
     cc_sensor_geometry geometry = {0};
     cc_sensor_timing timing = {0};
     const cc_vc4_profile_info *profile = NULL;
+    FILE *repeat_log = NULL;
+    int baseline_fds = 0;
+    if (repeat) {
+        repeat_log = fopen(meta, "w");
+        if (!repeat_log) {
+            ret = -errno;
+            goto done;
+        }
+        baseline_fds = open_fds();
+        if (baseline_fds < 0) {
+            ret = baseline_fds;
+            goto done;
+        }
+    }
     if (camera_id) ret=cc_camera_open_by_id(camera_id,&camera);
     else {
         ret=cc_enumerate(&list,&count);
@@ -373,7 +617,8 @@ int main(int argc, char **argv)
         goto done;
     pipeline.sensor = selected; /* Require the calibrated full-resolution mode. */
     pipeline.streams[0].sensor_bit_depth = depth;
-    pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24, .width = width, .height = height};
+    pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24,
+        .width = output_width ? output_width : width, .height = output_height ? output_height : height};
     pipeline.orientation = orientation;
     ret = cc_pipeline_configure(&planned_devices, &pipeline);
     if (ret < 0)
@@ -429,12 +674,14 @@ int main(int argc, char **argv)
     ret = cc_capture_configure_sensor_delays(capture, d, dn);
     if (ret < 0)
         goto done;
-    ret = cc_capture_enable_sensor_trace(capture, 1);
-    if (ret < 0)
-        goto done;
-    ret = cc_request_create(1, &request);
-    if (ret < 0)
-        goto done;
+    if (!repeat) {
+        ret = cc_capture_enable_sensor_trace(capture, 1);
+        if (ret < 0)
+            goto done;
+        ret = cc_request_create(1, &request);
+        if (ret < 0)
+            goto done;
+    }
     if (!diagnostic) {
         cc_sensor_mode_policy p;
         uint64_t duration;
@@ -465,6 +712,15 @@ int main(int argc, char **argv)
         }
         if (gain_selected)
             manual[mn++] = (cc_control){.id = V4L2_CID_ANALOGUE_GAIN, .value = gain};
+        if (repeat) {
+            if (fprintf(repeat_log, "{\"type\":\"configuration\",\"raw_width\":%u,\"raw_height\":%u,"
+                "\"rgb_width\":%u,\"rgb_height\":%u,\"profile\":\"%s\"}\n",
+                raw.width, raw.height, config.output[0].width, config.output[0].height, profile->calibration_id) < 0)
+                ret = -EIO;
+            else
+                ret = repeat_check(&capture, n, repeat, (int)timeout, manual, mn, repeat_log);
+            goto done;
+        }
         ret = cc_request_set_sensor_controls(request, manual, mn);
         if (ret < 0)
             goto done;
@@ -627,7 +883,18 @@ done:
     cc_camera_list_free(list);
     if (raw_file && fclose(raw_file) && !ret)
         ret = -EIO;
-    {
+    if (repeat_log) {
+        int final_fds = open_fds();
+        if (!ret && final_fds != baseline_fds)
+            ret = final_fds < 0 ? final_fds : -EIO;
+        if (fprintf(repeat_log, "{\"type\":\"summary\",\"fds_before_open\":%d,\"fds_after_close\":%d,\"error\":%d}\n",
+                    baseline_fds, final_fds, ret) < 0 && !ret)
+            ret = -EIO;
+        if (fclose(repeat_log) && !ret)
+            ret = -EIO;
+        if (!ret)
+            fprintf(stderr, "Repeat check completed for %u captures after restart. See %s.\n", repeat, meta);
+    } else if (!repeat) {
         int logged = metadata(meta, rows, row_count, traces, trace_count, trace_dropped, &raw,
                               &config.output[0], &geometry, delays, diagnostic, ret, &timing, orientation, profile);
         if (!ret)

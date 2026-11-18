@@ -13,12 +13,19 @@ external porting reference, not a build or runtime dependency.
 
 ## Current support
 
-- **Pi 4 and earlier:** Unicam raw capture and bcm2835 VC4 ISP processing, with
-  two image outputs and statistics.
-- **Pi 5:** RP1 CFE raw/statistics capture and PiSP back-end processing, including
-  crop, resize, flip and Bayer/mono conversion to RGB/YUV/luma.
-- **Other cameras:** self-contained V4L2 capture nodes, USB UVC cameras and the
-  VIMC Sensor B/debayer/scaler pipeline.
+| Pipeline | Implemented capture path | Validation |
+| --- | --- | --- |
+| Raspberry Pi 4B + standard OV5647 v1.3 | Unicam raw, VC4 RGB/YUV with two image outputs and statistics, calibrated still controls | Simulated driver and calibration checks. Physical acceptance pending using the [Pi 4B guide](docs/PI4_OV5647.md). |
+| Other Pi 4 or earlier Unicam/VC4 setups | Raw and processed capture, with calibrated still controls on selected modules | Software checks. Physical acceptance pending. See [profile coverage](docs/TUNING.md). |
+| Raspberry Pi 5 CFE/PiSP | Raw/statistics, up to two processed outputs, calibrated still controls on selected modules, native HDR/TDN on supported graphs | Software checks. No hardware validation. See [PiSP tuning](docs/TUNING.md#pi-5-cfepisp-photo-path) and [native photographs](docs/NATIVE_PHOTO.md). |
+| USB UVC | Native video formats and normalized controls reported by the selected device | Simulated driver checks. No USB camera hardware validation. |
+| Standalone V4L2 | Native formats on self-contained streaming capture nodes | Simulated queue and capture checks. Other device-specific behavior is unverified. |
+| VIMC | Sensor B through the kernel media graph's debayer and scaler | Software pipeline tests. VIMC is a virtual device. |
+
+Disconnect/reconnect and concurrent physical cameras remain unverified.
+Use the [capture contract](docs/CAPTURE.md#restart-and-recovery) for buffer
+ownership, errors and restarting. Fixed-focus OV5647 cannot validate the
+V3 autofocus path.
 
 Shared features include queued capture requests, MMAP/DMA-BUF buffers, native
 controls, firmware/USB location IDs with ID-based opening, hotplug notifications,

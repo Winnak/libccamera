@@ -107,15 +107,16 @@ typedef struct cc_frame_interval_range {
 } cc_frame_interval_range;
 
 typedef struct cc_plane {
-    void *data;
-    size_t length;
-    size_t bytes_used;
-    size_t data_offset;
+    void *data;          /* Borrowed mapping base, NULL for imported DMA-BUFs. */
+    size_t length;       /* Capacity in bytes. */
+    size_t bytes_used;   /* End of the payload, including data_offset. */
+    size_t data_offset;  /* Start of the payload in bytes. */
 } cc_plane;
 
 typedef struct cc_frame {
+    /* Queue-local index and native V4L2 sequence, flags and field. */
     uint32_t index, sequence, flags, field, num_planes;
-    uint64_t timestamp_ns;
+    uint64_t timestamp_ns; /* Native timestamp converted to ns. Use flags for clock/source. */
     cc_plane planes[CC_MAX_PLANES];
 } cc_frame;
 
@@ -315,7 +316,8 @@ CC_API int cc_camera_prepare_imports(cc_camera *camera, uint32_t *count);
 CC_API int cc_camera_import_buffer(cc_camera *camera, uint32_t index,
                                    const cc_dmabuf_plane *planes, uint32_t num_planes);
 CC_API int cc_camera_free_buffers(cc_camera *camera);
-/* Inspect idle/dequeued buffer mappings. A queued buffer is inaccessible. */
+/* Inspect idle/dequeued buffer mappings. A queued buffer is inaccessible.
+ * Completion metadata is zero before first dequeue and after stop or rebind. */
 CC_API int cc_camera_buffer(cc_camera *camera, uint32_t index, cc_frame *buffer);
 /* Returns a new CLOEXEC DMA-BUF fd (export or duplicated import) or negative errno. Caller owns it and must
  * close all exported fds before freeing/reallocating capture buffers. */
@@ -328,7 +330,8 @@ CC_API int cc_camera_start(cc_camera *camera);
  * (-ETIMEDOUT). Corrupt driver metadata returns -EPROTO after reclaiming the
  * indexed buffer; stop and restart capture on this error. */
 CC_API int cc_camera_dequeue(cc_camera *camera, cc_frame *frame, int timeout_ms);
-/* stop returns all queued buffers to the caller, retaining allocations. */
+/* On success, returns all queued slots, clears completion metadata and keeps
+ * allocations. Queue buffers before restarting. */
 CC_API int cc_camera_stop(cc_camera *camera);
 
 /* Controls use native V4L2 IDs, units and types. On CSI/VIMC cameras these refer to

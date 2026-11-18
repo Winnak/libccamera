@@ -733,6 +733,13 @@ static void test_queue_types_and_memory(void)
                     CHECK(done.planes[p].data_offset == frame.planes[p].data_offset);
                 }
             }
+            OK(cc_stream_stop(stream));
+            OK(cc_stream_buffer(stream, 0, &done));
+            CHECK(!done.flags && !done.sequence && !done.timestamp_ns && !done.field &&
+                  done.num_planes == frame.num_planes);
+            for (uint32_t p = 0; p < done.num_planes; ++p)
+                CHECK(!done.planes[p].bytes_used && !done.planes[p].data_offset &&
+                      done.planes[p].data == frame.planes[p].data && done.planes[p].length == frame.planes[p].length);
             cc_stream_close(stream);
             cc_stream_close(memory);
             cc_video_close(producer);

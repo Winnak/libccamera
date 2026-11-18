@@ -385,6 +385,18 @@ static void clear_buffers(cc_stream *stream)
     stream->allocated = stream->release_pending = false;
 }
 
+static void clear_completion(cc_frame *frame)
+{
+    frame->sequence = 0;
+    frame->flags = 0;
+    frame->field = 0;
+    frame->timestamp_ns = 0;
+    for (uint32_t i = 0; i < frame->num_planes; ++i) {
+        frame->planes[i].bytes_used = 0;
+        frame->planes[i].data_offset = 0;
+    }
+}
+
 int cc_stream_stop(cc_stream *stream)
 {
     int ret = usable(stream);
@@ -400,10 +412,7 @@ int cc_stream_stop(cc_stream *stream)
     stream->queued = 0;
     for (uint32_t i = 0; i < stream->num_buffers; ++i) {
         stream->buffers[i].queued = false;
-        for (uint32_t j = 0; j < stream->buffers[i].frame.num_planes; ++j) {
-            stream->buffers[i].frame.planes[j].bytes_used = 0;
-            stream->buffers[i].frame.planes[j].data_offset = 0;
-        }
+        clear_completion(&stream->buffers[i].frame);
     }
     return 0;
 }
@@ -602,6 +611,7 @@ int cc_stream_import(cc_stream *stream, uint32_t index, const cc_dmabuf_plane *p
         slot->fds[i] = fds[i];
         slot->frame.planes[i] = (cc_plane) { .length = planes[i].length };
     }
+    clear_completion(&slot->frame);
     slot->bound = true;
     return 0;
 }
@@ -623,6 +633,7 @@ int cc_stream_unimport(cc_stream *stream, uint32_t index)
         slot->fds[i] = -1;
         slot->frame.planes[i] = (cc_plane) {0};
     }
+    clear_completion(&slot->frame);
     slot->bound = false;
     return 0;
 }

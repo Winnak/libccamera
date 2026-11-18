@@ -63,7 +63,8 @@ lines += ['};', 'struct spatial_vector { unsigned step_x, step_y, size_x, size_y
 # grid steps and a decimated FE statistics grid.
 grid = [[1+max(0,min(1,(0.06-(x+2*y)*65/65535)/0.05)) for x in range(32)] for y in range(32)]
 for _ in range(3):
-    grid = [[sum(grid[b][a] for a,b in ((x,y),(x-1,y),(x+1,y),(x,y-1),(x,y+1)) if 0<=a<32 and 0<=b<32)/
+    # Keep floating-point accumulation consistent across Python versions.
+    grid = [[math.fsum(grid[b][a] for a,b in ((x,y),(x-1,y),(x+1,y),(x,y-1),(x,y+1)) if 0<=a<32 and 0<=b<32)/
              sum(1 for a,b in ((x,y),(x-1,y),(x+1,y),(x,y-1),(x,y+1)) if 0<=a<32 and 0<=b<32)
              for x in range(32)] for y in range(32)]
 for dx,dy,sx,sy,dec in ((8192,10922,32,24,0),(65535,65535,4,2,0),(8192,10922,16,12,1)):

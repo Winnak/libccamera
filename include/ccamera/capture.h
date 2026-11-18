@@ -18,6 +18,10 @@ extern "C" {
 typedef struct cc_capture cc_capture;
 typedef struct cc_request cc_request;
 
+/* Serialize operations on a graph, its requests and any shared devices.
+ * int operations return zero on success or a negative errno, except where
+ * documented to return an fd or status. Check the return value directly. */
+
 typedef struct cc_capture_devices {
     cc_camera *camera; /* Exactly one of camera/frontend. */
     cc_cfe *frontend;
@@ -51,7 +55,7 @@ typedef struct cc_native_photo_status {
 typedef struct cc_capture_result {
     enum cc_request_status status;
     int error; /* 0, -ECANCELED, or a negative errno; ERROR buffer flags give -EIO. */
-    uint64_t cookie, sequence; /* Request sequence, independent of sensor sequence. */
+    uint64_t cookie, sequence; /* Request sequence starts at zero and continues across stop/start. */
     cc_frame raw; /* Source frame; already processed RGB on VIMC. */
     cc_frame output[2];
     cc_frame statistics;
@@ -69,7 +73,8 @@ typedef struct cc_capture_result {
 } cc_capture_result;
 
 /* Adopt configured, allocated, idle devices. Success clears *devices and
- * transfers ownership, including buffers. Failure leaves ownership unchanged.
+ * transfers ownership, including buffers. Failure sets *capture to NULL and
+ * leaves devices, count and ownership unchanged.
  * Processor input must exactly match source layout. At most one processor;
  * frontend+vc4 is unsupported. Optional FE image1 is returned with the request
  * and must use MMAP storage when adopted by a graph. All calls must be serialized.
@@ -169,7 +174,8 @@ CC_API int cc_capture_schedule_sensor_controls(cc_capture *capture, uint32_t tar
 CC_API void cc_capture_close(cc_capture *capture);
 
 CC_API int cc_request_create(uint64_t cookie, cc_request **request);
-/* Returns -EBUSY while owned by a capture or referenced as another request's history. */
+/* NULL is a no-op. Returns -EBUSY while owned by a capture or referenced as
+ * another request's history. */
 CC_API int cc_request_destroy(cc_request *request);
 CC_API int cc_request_set_cookie(cc_request *request, uint64_t cookie);
 /* Automatic still transaction. Internally captures a bounded temporal sequence
@@ -267,13 +273,16 @@ CC_API int cc_request_set_af_controls(cc_request *request, const cc_af_controls 
 CC_API int cc_request_set_photo_controls(cc_request *request, const cc_photo_controls *controls);
 CC_API int cc_request_get_status(const cc_request *request); /* enum or negative errno. */
 /* Borrowed result after dequeue (or cancellation on capture_close), otherwise
- * NULL. Frame views last until release/stop/close. A failed frame can retain
- * views; graph cancellation clears every view, including delivered results. */
+ * NULL. Optional frames are present when num_planes != 0. Image/metadata views
+ * last until release/stop/close, or graph cancellation after an I/O error.
+ * A driver buffer-error completion can retain views. Copy wanted data before
+ * relinquishing a result. A copied result structure still borrows its planes. */
 CC_API const cc_capture_result *cc_request_get_result(const cc_request *request);
 
 /* Accepts up to 256 outstanding requests, including held results. Queue copies
  * no pixels and performs validation only; dispatch/dequeue drive the devices.
- * Requests beyond available slots wait in FIFO order. Capture and processing
+ * Requests beyond available slots wait in FIFO order. Failure leaves the
+ * request with the caller. Capture and processing
  * overlap; each lower-level controller still has one job in flight.
  * A request may belong to only one graph at a time. */
 CC_API int cc_capture_queue(cc_capture *capture, cc_request *request);
@@ -282,7 +291,8 @@ CC_API int cc_capture_queue(cc_capture *capture, cc_request *request);
  * unfinished device ports and pending acquire fences (POLLIN), with native
  * POLLIN/POLLOUT directions for hardware.
  * It does not dispatch. *count is capacity on input and required size on output;
- * NULL fds queries the size. -ENOSPC leaves fds unchanged. Borrowed fds. */
+ * NULL fds queries the size without reading *count. -ENOSPC leaves fds
+ * unchanged. Borrowed fds and their interest masks can change on dispatch. */
 CC_API int cc_capture_dispatch(cc_capture *capture);
 CC_API int cc_capture_pollfds(const cc_capture *capture, struct pollfd *fds, size_t *count);
 /* Remaining time until the earliest acquire-fence deadline, rounded up to ms; -1 in
@@ -295,18 +305,23 @@ CC_API int cc_capture_get_timeout(const cc_capture *capture, int *timeout_ms);
  * Timeouts retain all work and leave *request unchanged. Errors that cancel
  * work are reported in returned requests first, then as a negative errno once
  * the completion queue is drained. Complete requests keep slots until release.
- * If held slots prevent progress and no hardware is active, returns -EAGAIN. */
+ * If no request can make progress (e.g. all slots are held and only sensor
+ * events are available), returns -EAGAIN even for a blocking dequeue. */
 CC_API int cc_capture_dequeue(cc_capture *capture, cc_request **request, int timeout_ms);
-/* Release a delivered result, returning the request to IDLE. Cookie/tuning/
- * controls persist for reuse; all result views expire. No work is autoqueued. */
+/* Release a delivered result, returning the request to IDLE. Cookie, tuning,
+ * controls and image bindings persist for reuse; all result views expire.
+ * -EINVAL for an undelivered or foreign request, -EBUSY for pinned history.
+ * Native release errors may cancel the graph and leave the request owned.
+ * No work is autoqueued. */
 CC_API int cc_capture_release(cc_capture *capture, cc_request *request);
 /* Returns a caller-owned CLOEXEC fd. Finish downstream DMA before release,
  * stop or close, and close exports before destroying/reallocating the graph. */
 CC_API int cc_capture_export_plane(cc_capture *capture, const cc_request *request,
                                   enum cc_capture_stream stream, uint32_t plane);
-/* Cancel all owned requests and invalidate views. Cancelled requests remain
- * drainable/releasable. A successful stop permits reuse/restart; a failed stop
- * closes the graph before releasing memory and requires a new graph. */
+/* Cancel all owned requests and invalidate views. Undelivered requests remain
+ * drainable, delivered results remain releasable. A successful stop allows the
+ * next queued request to restart automatically through dispatch/dequeue. A
+ * failed stop closes the devices and requires closing/recreating the graph. */
 CC_API int cc_capture_stop(cc_capture *capture);
 
 #ifdef __cplusplus

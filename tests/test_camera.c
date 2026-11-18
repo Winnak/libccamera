@@ -1922,6 +1922,18 @@ static void test_request_capture(bool frontend)
     OK(cc_capture_dequeue(graph, &result, 0)); CHECK(result == requests[1]);
     CHECK(cc_request_get_result(result)->error == -ECANCELED);
     OK(cc_capture_release(graph, result));
+    for (uint64_t i = 7; i < 135; ++i) {
+        if (!(i % 16)) OK(cc_capture_stop(graph));
+        OK(cc_request_set_cookie(requests[0], i + 1000));
+        OK(cc_capture_queue(graph, requests[0]));
+        CHECK(!cc_request_get_result(requests[0]));
+        OK(cc_capture_dequeue(graph, &result, 100));
+        const cc_capture_result *r = cc_request_get_result(result);
+        CHECK(result == requests[0] && r->status == CC_REQUEST_COMPLETE && !r->error &&
+              r->cookie == i + 1000 && r->sequence == i && r->raw.num_planes);
+        OK(cc_capture_release(graph, result));
+        CHECK(!cc_request_get_result(result));
+    }
     OK(cc_capture_queue(graph, requests[0]));
     cc_capture_close(graph); /* Detach an undelivered request. */
     CHECK(cc_request_get_status(requests[0]) == CC_REQUEST_CANCELLED && cc_request_get_result(requests[0]));
@@ -1955,6 +1967,15 @@ static void test_request_failures(void)
             OK(cc_capture_release(c, r));
         }
         CHECK(cc_capture_dequeue(c, &r, 0) < 0);
+        if (fault < 4) {
+            f.clean_frames = true; f.corrupt_bytes = f.not_ready = false; f.wait_error = 0;
+            OK(cc_capture_stop(c));
+            OK(cc_capture_queue(c, requests[0]));
+            OK(cc_capture_dequeue(c, &r, 0));
+            CHECK(r == requests[0] && cc_request_get_status(r) == CC_REQUEST_COMPLETE &&
+                  cc_request_get_result(r)->sequence == 2);
+            OK(cc_capture_release(c, r));
+        }
         cc_capture_close(c);
         for (size_t i = 0; i < 2; ++i) OK(cc_request_destroy(requests[i]));
         CHECK(f.opened == f.closed && !f.live_maps);
@@ -2011,6 +2032,50 @@ static void test_request_validation(void)
         OK(cc_request_destroy(requests[i]));
     }
     CHECK(f.opened == f.closed && !f.live_maps);
+}
+
+static void test_independent_graph_reopen(void)
+{
+    struct fake source = fake_new(false, false), other = frontend_fake(2);
+    source.clean_frames = other.clean_frames = true;
+    uint32_t slots;
+    cc_capture *camera = request_graph(&source, false, &slots);
+    cc_capture *frontend = request_graph(&other, true, &slots);
+    cc_request *a, *b, *out;
+    OK(cc_request_create(101, &a));
+    OK(cc_request_create(202, &b));
+    source.not_ready = true;
+    OK(cc_capture_queue(camera, a));
+    OK(cc_capture_dispatch(camera));
+    OK(cc_capture_queue(frontend, b));
+    OK(cc_capture_dequeue(frontend, &out, 0));
+    CHECK(out == b && cc_request_get_status(b) == CC_REQUEST_COMPLETE);
+    const cc_capture_result *held = cc_request_get_result(b);
+    ERROR(cc_capture_release(camera, b), EINVAL);
+    source.wait_error = ENODEV;
+    fail_next(&source, VIDIOC_STREAMOFF, 1, ENODEV);
+    OK(cc_capture_dequeue(camera, &out, 10));
+    CHECK(out == a && cc_request_get_status(a) == CC_REQUEST_FAILED &&
+          cc_request_get_result(a)->error == -ENODEV);
+    OK(cc_capture_release(camera, a));
+    ERROR(cc_capture_stop(camera), ENODEV);
+    cc_capture_close(camera);
+    CHECK(source.opened == source.closed && !source.live_maps && held->raw.num_planes &&
+          held->status == CC_REQUEST_COMPLETE && held->cookie == 202);
+    source.not_ready = false;
+    source.wait_error = 0;
+    camera = request_graph(&source, false, &slots);
+    OK(cc_capture_queue(camera, a));
+    OK(cc_capture_dequeue(camera, &out, 0));
+    CHECK(out == a && cc_request_get_status(a) == CC_REQUEST_COMPLETE &&
+          cc_request_get_result(a)->sequence == 0);
+    OK(cc_capture_release(camera, a));
+    OK(cc_capture_release(frontend, b));
+    cc_capture_close(camera);
+    cc_capture_close(frontend);
+    OK(cc_request_destroy(a));
+    OK(cc_request_destroy(b));
+    CHECK(source.opened == source.closed && other.opened == other.closed && !source.live_maps && !other.live_maps);
 }
 
 static void configure_delays(cc_capture *c)
@@ -2070,6 +2135,11 @@ static void test_sensor_delays(bool frontend)
     struct pollfd fds[4]; size_t n = 4;
     OK(cc_capture_pollfds(c, fds, &n));
     CHECK(n == 1 && fds[0].events == POLLPRI && fds[0].fd == (frontend ? FE_VIDEO_BASE : VIDEO_FD));
+    int waits = f.wait_calls;
+    cc_request *unchanged = r;
+    ERROR(cc_capture_dequeue(c, &r, 10), EAGAIN);
+    ERROR(cc_capture_dequeue(c, &r, -1), EAGAIN);
+    CHECK(r == unchanged && f.wait_calls == waits);
     OK(cc_capture_stop(c)); CHECK(!f.event_subscribed && !held->sensor.count);
     OK(cc_capture_release(c, requests[0]));
     OK(cc_capture_queue(c, r));
@@ -2691,7 +2761,17 @@ static void test_startup_policy_trace(bool frontend)
     CHECK(trace[0].requested==99 && trace[0].acknowledged==99 && !trace[0].error);
     OK(cc_capture_stop(c));OK(cc_capture_queue(c,r));OK(cc_capture_dequeue(c,&out,0));
     CHECK(cc_request_get_result(out)->raw.sequence==2 && cc_request_get_result(out)->untrusted);
-    OK(cc_capture_release(c,out));cc_capture_close(c);OK(cc_request_destroy(r));
+    OK(cc_capture_release(c,out));
+    if (frontend) {
+        OK(cc_capture_stop(c));
+        f.fe_parameter_error = true;
+        OK(cc_capture_queue(c,r)); OK(cc_capture_dequeue(c,&out,0));
+        const cc_capture_result *bad = cc_request_get_result(out);
+        CHECK(bad->status == CC_REQUEST_FAILED && bad->error == -EIO && bad->raw.sequence == 0 &&
+              !(bad->raw.flags & V4L2_BUF_FLAG_ERROR) && (bad->frontend_parameters.flags & V4L2_BUF_FLAG_ERROR));
+        OK(cc_capture_release(c,out));
+    }
+    cc_capture_close(c);OK(cc_request_destroy(r));
     CHECK(f.opened==f.closed && !f.live_maps);
 }
 
@@ -3205,6 +3285,7 @@ int main(int argc, char **argv)
     }
     if (argc == 2 && !strcmp(argv[1], "requests")) {
         test_request_capture(false); test_request_capture(true); test_request_failures(); test_request_validation();
+        test_independent_graph_reopen();
         puts("Raw/CFE request queues, backpressure, snapshots, polling, timeout and cancellation passed");
         return 0;
     }

@@ -86,6 +86,7 @@ CC_API int cc_stream_import(cc_stream *stream, uint32_t index,
 CC_API int cc_stream_unimport(cc_stream *stream, uint32_t index);
 /* Idle/dequeued MMAP buffer data is writable, permitting ISP configuration
  * payloads. Imported planes have data == NULL and length set to import size.
+ * Completion metadata is zero before first dequeue and after stop or rebind.
  * All pointers become inaccessible on queue, free, or close. */
 CC_API int cc_stream_buffer(cc_stream *stream, uint32_t index, cc_frame *buffer);
 /* Returns a new owned CLOEXEC fd, exporting MMAP or duplicating an import. */
@@ -96,7 +97,12 @@ CC_API int cc_stream_export_plane(cc_stream *stream, uint32_t index, uint32_t pl
  * by the library; driver completion flags are returned unchanged on dequeue. */
 CC_API int cc_stream_queue(cc_stream *stream, uint32_t index, const cc_frame *payload);
 CC_API int cc_stream_start(cc_stream *stream);
+/* 0 polls once, -1 waits indefinitely, >0 bounds the wait in milliseconds.
+ * -EAGAIN and -ETIMEDOUT retain queued work and leave *frame unchanged.
+ * Stop before continuing after -EPROTO from malformed driver metadata. */
 CC_API int cc_stream_dequeue(cc_stream *stream, cc_frame *frame, int timeout_ms);
+/* On success, returns queued slots and resets completion metadata. Mappings
+ * and imports remain available for reuse. */
 CC_API int cc_stream_stop(cc_stream *stream);
 
 #ifdef __cplusplus

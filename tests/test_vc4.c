@@ -109,6 +109,7 @@ struct fake {
     bool widen_chroma, refuse_capacity, dma_pending, force_color_defaults;
     int format_sets[NODES];
     int capture_overlap;
+    unsigned char frame_marker;
     int32_t submitted_gain[SLOTS];
     unsigned char submitted_payload[SLOTS][8];
     int switch_delay_at, next_delayed_port;
@@ -943,7 +944,8 @@ static void process(struct fake *f)
                     struct buffer *plane = memory_plane(f, port, (int)i, (int)p);
                     uint32_t written = f->nodes[port].format.planes[p].size;
                     memset(plane->data, 0x30 + port + (int)p, written);
-                    if (f->sensor_support) *(unsigned char *)plane->data = *(const unsigned char *)raw->data;
+                    if (f->sensor_support || f->frame_marker)
+                        *(unsigned char *)plane->data = *(const unsigned char *)raw->data;
                     buffer_plane(&f->nodes[port], (int)i, (int)p)->used = written;
                 }
             out->timestamp = in->timestamp;
@@ -1215,6 +1217,8 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         b->queued = false;
         if (producer) {
             memset(memory_plane(f, node, (int)i, 0)->data, 0x77, b->size); b->used = b->size; b->timestamp = UINT64_C(123456789000);
+            if (f->frame_marker)
+                *(unsigned char *)memory_plane(f, node, (int)i, 0)->data = f->frame_marker;
             b->lens_setting=f->lens_position;
         }
         v->index = i;
@@ -2965,6 +2969,19 @@ static void test_pipeline_requests(bool pisp)
         OK(cc_capture_release(c, r));
     }
     OK(cc_capture_stop(c));
+    for (uint64_t i = 3; i < 131; ++i) {
+        f.frame_marker = (unsigned char)i;
+        OK(cc_request_set_cookie(requests[0], i + 500));
+        OK(cc_capture_queue(c, requests[0]));
+        OK(cc_capture_dequeue(c, &r, 0));
+        const cc_capture_result *result = cc_request_get_result(r);
+        CHECK(r == requests[0] && result->status == CC_REQUEST_COMPLETE && result->sequence == i &&
+              result->cookie == i + 500);
+        CHECK(*(const unsigned char *)result->raw.planes[0].data == f.frame_marker &&
+              *(const unsigned char *)result->output[0].planes[0].data == f.frame_marker);
+        OK(cc_capture_release(c, r));
+        if (i % 16 == 0) OK(cc_capture_stop(c));
+    }
     for (size_t i = 0; i < 3; ++i) OK(cc_request_destroy(requests[i]));
     cc_capture_close(c); finished(&f);
 }
@@ -3816,6 +3833,17 @@ static void test_processed_roles(bool pisp)
         uint32_t slots=2;
         if (pisp) { OK(cc_cfe_allocate_buffers(d.frontend,&slots)); OK(cc_pisp_be_allocate_buffers(d.backend,&slots)); }
         else { OK(cc_camera_allocate_buffers(d.camera,&slots)); OK(cc_vc4_isp_allocate_buffers(d.vc4,&slots)); }
+        if (sample==1) {
+            c.streams[0].format = (cc_format){.fourcc=c.streams[0].format.fourcc, .width=96, .height=72};
+            ERROR(cc_pipeline_configure(&d,&c),EBUSY);
+            if (pisp) { OK(cc_pisp_be_free_buffers(d.backend)); OK(cc_cfe_free_buffers(d.frontend)); }
+            else { OK(cc_vc4_isp_free_buffers(d.vc4)); OK(cc_camera_free_buffers(d.camera)); }
+            CHECK(cc_pipeline_configure(&d,&c)>=0);
+            CHECK(c.streams[0].format.width==96 && c.streams[0].format.height==72);
+            slots=2;
+            if (pisp) { OK(cc_cfe_allocate_buffers(d.frontend,&slots)); OK(cc_pisp_be_allocate_buffers(d.backend,&slots)); }
+            else { OK(cc_camera_allocate_buffers(d.camera,&slots)); OK(cc_vc4_isp_allocate_buffers(d.vc4,&slots)); }
+        }
         cc_capture *capture=NULL; OK(cc_capture_create(&d,&capture,&slots));
         cc_request *request=NULL,*out=NULL; OK(cc_request_create(23,&request)); OK(cc_capture_queue(capture,request));
         OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==request && cc_request_get_result(out)->status==CC_REQUEST_COMPLETE);
