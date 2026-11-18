@@ -20,39 +20,92 @@ static double pwl(const double *v, size_t n, double x)
         if (x <= v[i]) return v[i-1] + (v[i+1]-v[i-1]) * (x-v[i-2]) / (v[i]-v[i-2]);
     return v[n-1];
 }
-static double sample(const double *table, double x, double y)
-{
-    x = clamp(x, 0, 31); y = clamp(y, 0, 31);
-    unsigned a = (unsigned)x, b = (unsigned)y, c = a < 31 ? a+1 : a, d = b < 31 ? b+1 : b;
-    double u = x-a, v = y-b;
-    return (table[b*32+a]*(1-u)+table[b*32+c]*u)*(1-v) +
-           (table[d*32+a]*(1-u)+table[d*32+c]*u)*v;
-}
 const cc_rpi_profile_info *cc_pisp_get_profile_info(cc_rpi_profile profile)
 {
     const struct cc_vc4_profile_data *p = cc_pisp_profile_data(profile);
     return p ? &p->info : NULL;
 }
+int cc_pisp_lookup_profile(const char *name, cc_rpi_profile *out)
+{
+    if (!name || !out)
+        return -EINVAL;
+    for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX477_16MM; ++i) {
+        const cc_rpi_profile_info *p = cc_pisp_get_profile_info((cc_rpi_profile)i);
+        if (p && !strcmp(name, p->name)) {
+            *out = p->profile;
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
 int cc_pisp_select_profile(const cc_sensor_model *sensor, cc_rpi_profile override, cc_rpi_profile *out)
 {
-    if (!out) return -EINVAL;
-    cc_rpi_profile selected;
-    int ret=cc_vc4_select_profile(sensor,override,&selected);
-    if (!ret && !cc_pisp_get_profile_info(selected)) ret=-ENOTSUP;
-    if (!ret) *out=selected;
-    return ret;
+    if (!sensor || !out)
+        return -EINVAL;
+    const cc_sensor_properties *s = cc_sensor_get_properties(sensor);
+    if (!s)
+        return -EINVAL;
+    if (override == CC_VC4_PROFILE_AUTO)
+        return cc_pisp_lookup_profile(s->model, out) == 0 ? 0 : -ENOTSUP;
+    const cc_rpi_profile_info *p = cc_pisp_get_profile_info(override);
+    if (!p)
+        return -EINVAL;
+    if (strcmp(s->model, p->sensor_model))
+        return -ENOTSUP;
+    *out = override;
+    return 0;
 }
-static void sharpen(const struct cc_vc4_profile_data *p, struct pisp_be_config *b)
+static uint16_t grid_step(uint32_t extent, uint32_t size)
+{
+    uint32_t step = extent / size;
+    return (uint16_t)(step > UINT16_MAX ? UINT16_MAX : step);
+}
+static void aberration(const struct cc_vc4_profile_data *p, const cc_sensor_geometry *g,
+                       struct pisp_be_config *b)
+{
+    if (!p->cac)
+        return;
+    /* The reference tables are corner-sampled displacement vectors. Map
+     * each vertex to the active area and convert shifts to mode pixels. */
+    const unsigned cell = 1U << PISP_BE_CAC_STEP_PRECISION;
+    const unsigned cells = PISP_BE_CAC_GRID_SIZE;
+    uint32_t extent = cells * cell;
+    b->cac.grid_step_x = grid_step(extent, g->width);
+    b->cac.grid_step_y = grid_step(extent, g->height);
+    double dx = (double)g->width / g->crop.width * (g->hflip ? -1 : 1);
+    double dy = (double)g->height / g->crop.height * (g->vflip ? -1 : 1);
+    const double scale[] = {dx, dy};
+    for (unsigned y = 0; y <= cells; ++y)
+        for (unsigned x = 0; x <= cells; ++x) {
+            double u = clamp((double)x * cell / b->cac.grid_step_x / g->width, 0, 1);
+            double v = clamp((double)y * cell / b->cac.grid_step_y / g->height, 0, 1);
+            if (g->hflip)
+                u = 1 - u;
+            if (g->vflip)
+                v = 1 - v;
+            double sx = (g->crop.x - g->active.x + u * g->crop.width) / g->active.width * cells;
+            double sy = (g->crop.y - g->active.y + v * g->crop.height) / g->active.height * cells;
+            for (unsigned ch = 0; ch < 2; ++ch)
+                for (unsigned axis = 0; axis < 2; ++axis) {
+                    double shift = cc_rpi_sample_grid(p->cac[2 * ch + axis], cells + 1, cells + 1, sx, sy);
+                    double code = shift * scale[axis] * p->cac_strength * 32;
+                    b->cac.lut[y][x][ch][axis] = (int8_t)clamp(code + (code < 0 ? -0.5 : 0.5), -64, 63);
+                }
+        }
+    b->global.bayer_enables |= PISP_BE_BAYER_ENABLE_CAC;
+}
+static void sharpen(const struct cc_vc4_profile_data *p, double mode_factor, struct pisp_be_config *b)
 {
     b->sharpen = pisp_sharpen_base;
 #define SCALE(name, value, bits) b->sharpen.name = (uint16_t)field(b->sharpen.name * (value), bits, 0)
-    double scale = p->sharpen_threshold * 0.25;
+    double scale = p->sharpen_threshold * mode_factor * 0.25;
 #define FILTER(i) SCALE(threshold_offset##i, scale, 16); SCALE(threshold_slope##i, scale, 12)
     FILTER(0); FILTER(1); FILTER(2); FILTER(3); FILTER(4);
 #undef FILTER
-    SCALE(positive_strength, p->sharpen_strength, 12); SCALE(negative_strength, p->sharpen_strength, 12);
-    SCALE(positive_pre_limit, p->sharpen_limit, 16); SCALE(negative_pre_limit, p->sharpen_limit, 16);
-    SCALE(positive_limit, p->sharpen_limit, 16); SCALE(negative_limit, p->sharpen_limit, 16);
+    double strength = p->sharpen_strength / mode_factor, limit = p->sharpen_limit / mode_factor;
+    SCALE(positive_strength, strength, 12); SCALE(negative_strength, strength, 12);
+    SCALE(positive_pre_limit, limit, 16); SCALE(negative_pre_limit, limit, 16);
+    SCALE(positive_limit, limit, 16); SCALE(negative_limit, limit, 16);
 #undef SCALE
     b->sh_fc_combine.y_factor = 192;
     b->ycbcr = (struct pisp_be_ccm_config){.coeffs={306,601,117,-173,-339,512,512,-429,-83},
@@ -60,13 +113,15 @@ static void sharpen(const struct cc_vc4_profile_data *p, struct pisp_be_config *
     b->ycbcr_inverse = (struct pisp_be_ccm_config){.coeffs={1024,0,1436,1024,-352,-731,1024,1815,0},
         .offsets={-47043259,35509710,-59458469}};
 }
-int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *g, double ct,
-    double gain, double red, double blue, struct pisp_fe_config *fe, struct pisp_be_config *be)
+int cc_pisp_build_tuning_with_shading(cc_rpi_profile profile, const cc_sensor_geometry *g, double ct,
+    double gain, double red, double blue, const cc_rpi_lens_shading *shading,
+    struct pisp_fe_config *fe, struct pisp_be_config *be)
 {
     const struct cc_vc4_profile_data *p = cc_pisp_profile_data(profile);
     if (!p || !fe || !be || !cc_sensor_geometry_valid(g) || g->width < 64 || g->height < 64 ||
         (g->width | g->height) & 1U || !(ct >= 2000 && ct <= 13000) || !(gain >= 1 && gain <= 64) ||
-        !(red >= 0.5 && red <= 4) || !(blue >= 0.5 && blue <= 4)) return -EINVAL;
+        !(red >= 0.5 && red <= 4) || !(blue >= 0.5 && blue <= 4) ||
+        !cc_rpi_lens_shading_valid(shading)) return -EINVAL;
     struct pisp_fe_config f = {0}; struct pisp_be_config b = {0};
     f.global.enables = PISP_FE_ENABLE_BLC | PISP_FE_ENABLE_RGBY | PISP_FE_ENABLE_AGC_STATS |
         PISP_FE_ENABLE_AWB_STATS | PISP_FE_ENABLE_CDAF_STATS;
@@ -98,6 +153,8 @@ int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *g, do
         .slope_sharper=(uint16_t)field(p->geq_slope*gain,10,10),.max=65535};
     double root=gain;
     for (unsigned i=0; i<16; ++i) root=(root+gain/root)*0.5;
+    double mode_factor = cc_rpi_mode_noise_factor(g);
+    root /= mode_factor;
     b.sdn = (struct pisp_be_sdn_config){.black_level=p->black,
         .leakage=(uint8_t)field(1-p->sdn_strength,8,8),
         .noise_constant=(uint16_t)field(p->noise_constant*root*p->sdn_deviation,16,0),
@@ -130,26 +187,18 @@ int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *g, do
         full[1][i]=lum;
         full[2][i]=lum/(p->lsc_b[li*1024+i]*(1-mix)+p->lsc_b[(li+1)*1024+i]*mix);
     }
-    for (unsigned ch=0; ch<3; ++ch) {
-        double low=DBL_MAX;
-        for (unsigned y0=0; y0<32; ++y0) for (unsigned x0=0; x0<32; ++x0) {
-            double u=((double)x0+0.5)/32, v=((double)y0+0.5)/32;
-            if (g->hflip) u=1-u;
-            if (g->vflip) v=1-v;
-            double x=((g->crop.x-g->active.x)+u*g->crop.width)/g->active.width*32-0.5;
-            double y1=((g->crop.y-g->active.y)+v*g->crop.height)/g->active.height*32-0.5;
-            double value=sample(full[ch],x,y1); adjusted[ch][y0*32+x0]=value;
-            if (value<low) low=value;
-        }
-        for (unsigned i=0; i<1024; ++i) adjusted[ch][i]/=low;
-    }
+    for (unsigned ch=0; ch<3; ++ch)
+        if (shading && shading->enabled)
+            cc_rpi_resample_shading(shading->gains[ch], 16, 12, g, adjusted[ch], 32, 32);
+        else
+            cc_rpi_resample_shading(full[ch], 32, 32, g, adjusted[ch], 32, 32);
     uint32_t extent=32U<<18;
-    b.lsc.grid_step_x=(uint16_t)(extent/g->width>65535 ? 65535 : extent/g->width);
-    b.lsc.grid_step_y=(uint16_t)(extent/g->height>65535 ? 65535 : extent/g->height);
+    b.lsc.grid_step_x = grid_step(extent, g->width);
+    b.lsc.grid_step_y = grid_step(extent, g->height);
     for (unsigned y0=0; y0<33; ++y0) for (unsigned x0=0; x0<33; ++x0) {
         double rgb[3], lo=DBL_MAX, hi=0;
         for (unsigned ch=0; ch<3; ++ch) {
-            rgb[ch]=sample(adjusted[ch],(double)x0*(1U<<18)/b.lsc.grid_step_x/g->width*32-0.5,
+            rgb[ch]=cc_rpi_sample_grid(adjusted[ch],32,32,(double)x0*(1U<<18)/b.lsc.grid_step_x/g->width*32-0.5,
                 (double)y0*(1U<<18)/b.lsc.grid_step_y/g->height*32-0.5);
             if (rgb[ch]<lo) lo=rgb[ch];
             if (rgb[ch]>hi) hi=rgb[ch];
@@ -159,7 +208,13 @@ int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *g, do
         b.lsc.lut_packed[y0][x0]=(range<<30) | field(offset+scale*rgb[0],10,0) |
             (field(offset+scale*rgb[1],10,0)<<10) | (field(offset+scale*rgb[2],10,0)<<20);
     }
-    sharpen(p,&b);
+    aberration(p,g,&b);
+    sharpen(p,mode_factor,&b);
     *fe=f; *be=b;
     return 0;
+}
+int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *g, double ct,
+    double gain, double red, double blue, struct pisp_fe_config *fe, struct pisp_be_config *be)
+{
+    return cc_pisp_build_tuning_with_shading(profile, g, ct, gain, red, blue, NULL, fe, be);
 }

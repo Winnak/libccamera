@@ -195,6 +195,51 @@ static void profile_vectors(void)
         CHECK(!memcmp(&saved, &t, sizeof(t)));
     }
 }
+static void measured_shading(void)
+{
+    cc_ipa_vc4_options options = {.profile = CC_VC4_PROFILE_IMX477, .lens_shading.enabled = 1};
+    for (unsigned y = 0; y < 12; ++y)
+        for (unsigned x = 0; x < 16; ++x) {
+            options.lens_shading.gains[0][y * 16 + x] = 1 + x / 16.0;
+            options.lens_shading.gains[1][y * 16 + x] = 1;
+            options.lens_shading.gains[2][y * 16 + x] = 1 + y / 8.0;
+        }
+    cc_sensor_geometry g = geometry();
+    cc_vc4_tuning full, cropped;
+    OK(cc_vc4_build_tuning_with_shading(options.profile, &g, 4500, 1, &options.lens_shading, &full));
+    CHECK(full.lens_shading[0][15] == 1 + 15 / 16.0 && full.lens_shading[2][191] == 1 + 11 / 8.0);
+    g.crop.width /= 2;
+    g.width /= 4;
+    g.hflip = 1;
+    OK(cc_vc4_build_tuning_with_shading(options.profile, &g, 4500, 1, &options.lens_shading, &cropped));
+    CHECK(cropped.lens_shading[0][0] == 1 + 7.25 / 16 && cropped.lens_shading[0][15] == 1);
+    const double mode_factor = 1.4142135623730951;
+    CHECK(abs((int)(cropped.denoise.slope.num * mode_factor) - full.denoise.slope.num) <= 2);
+    CHECK(abs((int)(cropped.sharpen.strength.num * mode_factor) - full.sharpen.strength.num) <= 2);
+    CHECK(abs((int)(full.sharpen.threshold.num * mode_factor) - cropped.sharpen.threshold.num) <= 1);
+
+    cc_ipa_configuration c = configuration();
+    OK(cc_sensor_lookup("imx477", &c.sensor));
+    c.sensor_controls[1].minimum = 0;
+    c.sensor_controls[1].maximum = 960;
+    c.initial_controls[1].value = 0;
+    cc_ipa *ipa;
+    OK(create_controller(&options, &ipa));
+    options.lens_shading.gains[0][0] = NAN;
+    cc_vc4_tuning saved = full;
+    CHECK(cc_vc4_build_tuning_with_shading(options.profile, &g, 4500, 1, &options.lens_shading, &full) == -EINVAL);
+    CHECK(!memcmp(&full, &saved, sizeof(full)));
+    cc_ipa *invalid = NULL;
+    CHECK(create_controller(&options, &invalid) == -EINVAL && !invalid);
+    OK(cc_ipa_configure(ipa, &c));
+    OK(cc_ipa_start(ipa));
+    cc_ipa_request request = {.timing = c.timing, .timing_limits = c.timing_limits};
+    cc_ipa_settings s;
+    OK(cc_ipa_prepare(ipa, &request, &s));
+    CHECK(s.flags & CC_IPA_VC4_TUNING);
+    CHECK(!memcmp(full.lens_shading, s.vc4.lens_shading, sizeof(full.lens_shading)));
+    cc_ipa_destroy(ipa);
+}
 static void selection(void)
 {
     CHECK(!cc_vc4_get_profile_info(CC_VC4_PROFILE_AUTO));
@@ -452,6 +497,7 @@ int main(int argc, char **argv)
     live_geometry();
     profile();
     profile_vectors();
+    measured_shading();
     selection();
     module_controllers();
     flicker();

@@ -46,8 +46,9 @@ static void vectors(void)
         const struct pisp_vector *v=&pisp_vectors[n];
         g.crop=v->crop ? (cc_rectangle){1040,776,2048,1536} : g.active;
         const cc_rpi_profile_info *info=cc_pisp_get_profile_info(v->profile);
+        const cc_vc4_profile_info *vc4 = cc_vc4_get_profile_info(v->profile);
         CHECK(info && strstr(info->calibration_id,"-pisp-") &&
-            strcmp(info->calibration_id,cc_vc4_get_profile_info(v->profile)->calibration_id));
+            (!vc4 || strcmp(info->calibration_id,vc4->calibration_id)));
         struct pisp_fe_config f; struct pisp_be_config b;
         OK(cc_pisp_build_tuning(v->profile,&g,v->ct,v->gain,1.5,2,&f,&b));
         CHECK(b.blc.black_level_r==v->black && f.blc.black_level_b==v->black &&
@@ -59,8 +60,10 @@ static void vectors(void)
         for (unsigned y=0;y<3;++y) for (unsigned x=0;x<3;++x) for (unsigned ch=0;ch<3;++ch)
             CHECK(fabs(unpack(b.lsc.lut_packed[y*16][x*16],ch)-unpack(v->shading[y*3+x],ch))<0.01);
         CHECK(b.wbg.gain_r==1536 && b.wbg.gain_g==1024 && b.wbg.gain_b==2048);
-        CHECK(b.sharpen.kernel0[12]==6 && b.sharpen.positive_strength==76 &&
-            b.sharpen.threshold_offset0==19 && b.sharpen.positive_limit==2000);
+        CHECK(b.sharpen.kernel0[12]==6 && b.sharpen.positive_strength==38 &&
+            b.sharpen.threshold_offset0==38 && b.sharpen.positive_limit==1000);
+        bool cac = (info->flags & CC_VC4_PROFILE_LENS_CAC) != 0;
+        CHECK(!!(b.global.bayer_enables & PISP_BE_BAYER_ENABLE_CAC) == cac);
         for (unsigned y=0;y<16;++y) CHECK(!(f.agc_stats.weights[y*8+7]&0xf0));
         for (unsigned x=0;x<8;++x) CHECK(!f.agc_stats.weights[120+x]);
         struct pisp_fe_config finalized;
@@ -76,6 +79,8 @@ static void vectors(void)
             CHECK(native.num_tiles && native.config.global.rgb_enables&PISP_BE_RGB_ENABLE_GAMMA);
             CHECK(native.config.ccm.coeffs[0]==b.ccm.coeffs[0] &&
                 native.config.lsc.lut_packed[0][0]==b.lsc.lut_packed[0][0]);
+            CHECK(!!(native.config.global.bayer_enables & PISP_BE_BAYER_ENABLE_CAC) == cac);
+            CHECK(!memcmp(&native.config.cac, &b.cac, sizeof(b.cac)));
         }
         struct pisp_fe_config fs=f; struct pisp_be_config bs=b;
         CHECK(cc_pisp_build_tuning(v->profile,&g,NAN,1,1,1,&f,&b)==-EINVAL);
@@ -114,7 +119,7 @@ static cc_ipa_configuration configuration(cc_rpi_profile profile)
 }
 static void controllers(void)
 {
-    for (unsigned id=CC_VC4_PROFILE_OV5647;id<=CC_VC4_PROFILE_IMX708_WIDE_NOIR;++id) {
+    for (unsigned id=CC_VC4_PROFILE_OV5647;id<=CC_VC4_PROFILE_IMX477_16MM;++id) {
         cc_rpi_profile profile=(cc_rpi_profile)id; cc_ipa_configuration c=configuration(profile);
         cc_ipa_pisp_options options={.mains_hz=50,.profile=profile,.red_gain=1,.blue_gain=1};
         cc_ipa *ipa; OK(create(&options,&ipa)); OK(cc_ipa_configure(ipa,&c)); OK(cc_ipa_start(ipa));
@@ -123,6 +128,8 @@ static void controllers(void)
         for (unsigned iteration=0;iteration<160;++iteration) {
             cc_ipa_settings s; OK(cc_ipa_prepare(ipa,&request,&s));
             CHECK(s.flags==(CC_IPA_FRONTEND|CC_IPA_BACKEND) && !s.num_isp_controls && s.colour_temperature>=2500);
+            CHECK(!!(s.backend.global.bayer_enables & PISP_BE_BAYER_ENABLE_CAC) ==
+                  !!(cc_pisp_get_profile_info(profile)->flags & CC_VC4_PROFILE_LENS_CAC));
             double gain; uint64_t ns;
             OK(cc_sensor_gain(c.sensor,(uint32_t)s.sensor_controls[2].value,&gain));
             OK(cc_sensor_exposure_time(c.sensor,&request.timing,(uint32_t)s.sensor_controls[1].value,&ns));
@@ -163,7 +170,7 @@ static double shading(const struct pisp_be_config *b,double x,double y,unsigned 
 }
 static void white_balance(void)
 {
-    for (unsigned id=CC_VC4_PROFILE_OV5647;id<=CC_VC4_PROFILE_IMX708_WIDE_NOIR;++id) {
+    for (unsigned id=CC_VC4_PROFILE_OV5647;id<=CC_VC4_PROFILE_IMX477_16MM;++id) {
         const struct pisp_vector *v=NULL;
         for (size_t i=0;i<sizeof(pisp_vectors)/sizeof(pisp_vectors[0]);++i)
             if ((unsigned)pisp_vectors[i].profile==id) { v=&pisp_vectors[i];break; }
@@ -212,6 +219,82 @@ static void white_balance(void)
         cc_ipa_destroy(ipa);
     }
 }
+static void aberration(void)
+{
+    for (unsigned i = 0; i < sizeof(cac_vectors) / sizeof(cac_vectors[0]); ++i) {
+        const struct cac_vector *v = &cac_vectors[i];
+        cc_sensor_geometry g = geometry();
+        g.width = g.active.width;
+        g.height = g.active.height;
+        struct pisp_fe_config f;
+        struct pisp_be_config full, cropped;
+        OK(cc_pisp_build_tuning(v->profile, &g, 4500, 1, 1, 1, &f, &full));
+        CHECK(full.cac.grid_step_x == ((8U << 20) / g.width));
+        CHECK(full.cac.grid_step_y == ((8U << 20) / g.height));
+        for (unsigned y = 0; y < 9; ++y)
+            for (unsigned x = 0; x < 9; ++x)
+                for (unsigned ch = 0; ch < 2; ++ch)
+                    for (unsigned axis = 0; axis < 2; ++axis)
+                        CHECK(abs(full.cac.lut[y][x][ch][axis] - v->shifts[y * 9 + x][2 * ch + axis]) <= 1);
+        g.crop.width /= 2;
+        g.crop.height /= 2;
+        g.width /= 4;
+        g.height /= 4;
+        g.hflip = g.vflip = 1;
+        OK(cc_pisp_build_tuning(v->profile, &g, 4500, 1, 1, 1, &f, &cropped));
+        for (unsigned ch = 0; ch < 2; ++ch)
+            for (unsigned axis = 0; axis < 2; ++axis) {
+                CHECK(abs(2 * cropped.cac.lut[0][0][ch][axis] + v->shifts[40][2 * ch + axis]) <= 2);
+                CHECK(abs(2 * cropped.cac.lut[8][8][ch][axis] + v->shifts[0][2 * ch + axis]) <= 2);
+            }
+    }
+}
+static void measured_shading(void)
+{
+    const cc_sensor_model *hq, *other;
+    OK(cc_sensor_lookup("imx477", &hq));
+    OK(cc_sensor_lookup("imx219", &other));
+    cc_rpi_profile profile;
+    OK(cc_pisp_select_profile(hq, CC_VC4_PROFILE_AUTO, &profile));
+    CHECK(profile == CC_VC4_PROFILE_IMX477);
+    OK(cc_pisp_lookup_profile("imx477_16mm", &profile));
+    CHECK(profile == CC_VC4_PROFILE_IMX477_16MM && !cc_vc4_get_profile_info(profile));
+    CHECK(cc_vc4_lookup_profile("imx477_16mm", &profile) == -ENOENT);
+    CHECK(cc_pisp_select_profile(other, profile, &profile) == -ENOTSUP);
+    CHECK(cc_pisp_lookup_profile("imx477_16mm_typo", &profile) == -ENOENT);
+    CHECK(profile == CC_VC4_PROFILE_IMX477_16MM);
+    OK(cc_pisp_select_profile(hq, profile, &profile));
+
+    cc_ipa_pisp_options o = {.profile = profile, .lens_shading.enabled = 1};
+    for (unsigned y = 0; y < 12; ++y)
+        for (unsigned x = 0; x < 16; ++x) {
+            o.lens_shading.gains[0][y * 16 + x] = 1 + x / 15.0;
+            o.lens_shading.gains[1][y * 16 + x] = 1;
+            o.lens_shading.gains[2][y * 16 + x] = 1 + y / 11.0;
+        }
+    cc_ipa_configuration c = configuration(profile);
+    struct pisp_fe_config f;
+    struct pisp_be_config b;
+    c.geometry.hflip = 1;
+    OK(cc_pisp_build_tuning_with_shading(profile, &c.geometry, 4500, 1, 1, 1, &o.lens_shading, &f, &b));
+    CHECK(fabs(unpack(b.lsc.lut_packed[0][0], 0) - 2) < 0.01);
+    CHECK(fabs(unpack(b.lsc.lut_packed[0][32], 0) - 1) < 0.01);
+    CHECK(fabs(unpack(b.lsc.lut_packed[32][0], 2) - 2) < 0.01);
+    cc_ipa *ipa;
+    OK(create(&o, &ipa));
+    o.lens_shading.gains[1][0] = 8;
+    struct pisp_be_config saved = b;
+    struct pisp_fe_config saved_fe = f;
+    CHECK(cc_pisp_build_tuning_with_shading(profile, &c.geometry, 4500, 1, 1, 1, &o.lens_shading, &f, &b) == -EINVAL);
+    CHECK(!memcmp(&b, &saved, sizeof(b)) && !memcmp(&f, &saved_fe, sizeof(f)));
+    OK(cc_ipa_configure(ipa, &c));
+    OK(cc_ipa_start(ipa));
+    cc_ipa_request request = {.timing = c.timing, .timing_limits = c.timing_limits};
+    cc_ipa_settings s;
+    OK(cc_ipa_prepare(ipa, &request, &s));
+    CHECK(!memcmp(&s.backend.lsc, &b.lsc, sizeof(b.lsc)) && !memcmp(&s.backend.cac, &b.cac, sizeof(b.cac)));
+    cc_ipa_destroy(ipa);
+}
 int main(int argc,char **argv)
 {
     CHECK(argc==1 || argc==2); if (argc==2) {
@@ -219,5 +302,6 @@ int main(int argc,char **argv)
         if (ret==-ENOSYS || ret==-EPERM || ret==-EACCES) return 77;
         OK(ret); cc_ipa_destroy(probe);
     }
-    vectors(); controllers(); white_balance(); puts("PiSP calibrated native blocks and feedback passed"); return 0;
+    vectors(); aberration(); measured_shading(); controllers(); white_balance();
+    puts("PiSP calibrated native blocks and feedback passed"); return 0;
 }

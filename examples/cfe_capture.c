@@ -85,7 +85,8 @@ static void usage(const char *program)
             "-F selects RGB/YUV output; -A/-a enables output1 (default YU12).\n"
             "-g adds reference automatic exposure, and white balance with -p.\n"
             "-q auto/NAME adds calibrated PiSP photo processing and AE/AWB (implies -p);\n"
-            "use a module name from ccamera-still --list-profiles; excludes -g/-j.\n"
+            "use a module name from ccamera-still --list-profiles, or imx477_6mm/imx477_16mm;\n"
+            "excludes -g/-j.\n"
             "-D adds automatic native temporal/HDR still sequences (implies -q auto).\n"
             "-j adds the standard V3/IMX708 continuous autofocus profile (opt-in).\n"
             "Transforms: 0 none, 1 horizontal flip, 2 vertical flip, 3 both.\n",
@@ -122,7 +123,7 @@ int main(int argc, char **argv)
         case 'j': autofocus = true; break;
         case 'q':
             process=calibrated=true;
-            ret=!strcmp(optarg,"auto") ? (photo.profile=CC_VC4_PROFILE_AUTO,0) : cc_vc4_lookup_profile(optarg,&photo.profile);
+            ret=!strcmp(optarg,"auto") ? (photo.profile=CC_VC4_PROFILE_AUTO,0) : cc_pisp_lookup_profile(optarg,&photo.profile);
             break;
         case 'D':
             process=calibrated=true;

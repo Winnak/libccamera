@@ -44,7 +44,16 @@ static void pointer_inputs(void)
     cc_ipa_wire *vc4_wire = roundtrip(CC_IPA_WIRE_VC4, &vc4);
     const cc_ipa_vc4_options *vc4_copy = cc_ipa_wire_object(vc4_wire);
     CHECK(vc4_copy->profile == vc4.profile && vc4_copy->mains_hz == 60 &&
-          vc4_copy->red_gain == 1.5 && vc4_copy->blue_gain == 2);
+          vc4_copy->red_gain == 1.5 && vc4_copy->blue_gain == 2 && !vc4_copy->lens_shading.enabled);
+    cc_ipa_wire_destroy(vc4_wire);
+    vc4.lens_shading.enabled = 1;
+    for (unsigned ch = 0; ch < 3; ++ch)
+        for (unsigned i = 0; i < CC_VC4_LSC_SAMPLES; ++i)
+            vc4.lens_shading.gains[ch][i] = 1 + (ch + i) / 192.0;
+    vc4_wire = roundtrip(CC_IPA_WIRE_VC4, &vc4);
+    vc4_copy = cc_ipa_wire_object(vc4_wire);
+    CHECK(vc4_copy->lens_shading.enabled == 1 &&
+          !memcmp(vc4_copy->lens_shading.gains, vc4.lens_shading.gains, sizeof(vc4.lens_shading.gains)));
     cc_ipa_wire_destroy(vc4_wire);
     const cc_sensor_model *sensor; OK(cc_sensor_lookup("imx708", &sensor));
     static const cc_control control = {123, -99, NULL, 0};

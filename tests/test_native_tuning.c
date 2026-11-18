@@ -12,14 +12,15 @@ int main(void)
         const struct cc_vc4_profile_data *p=cc_pisp_profile_data((cc_rpi_profile)v->profile);
         CHECK(p);
         struct pisp_be_config b={0};
-        cc_pisp_native_denoise(p,v->gain,0.5,v->frames,(int)v->hdr,&b);
+        cc_pisp_native_denoise(p,v->gain,v->mode_factor,0.5,v->frames,(int)v->hdr,&b);
         CHECK(b.tdn.reset==!v->frames && b.tdn.ratio==8192);
         CHECK(b.tdn.noise_constant==v->constant && b.tdn.noise_slope==v->slope && b.tdn.threshold==v->threshold);
         CHECK(b.sdn.noise_constant==v->sdn[0] && b.sdn.noise_slope==v->sdn[1] &&
             b.sdn.noise_constant2==v->sdn[2] && b.sdn.noise_slope2==v->sdn[3] &&
             b.sdn.leakage==v->sdn[4] && b.cdn.thresh==v->cdn);
     }
-    for (unsigned id=1; id<=10; ++id) for (size_t i=0; i<sizeof(hdr_vectors)/sizeof(hdr_vectors[0]); ++i) {
+    for (unsigned id=CC_VC4_PROFILE_OV5647; id<=CC_VC4_PROFILE_IMX477_16MM; ++id)
+    for (size_t i=0; i<sizeof(hdr_vectors)/sizeof(hdr_vectors[0]); ++i) {
         const struct hdr_vector *v=&hdr_vectors[i];
         struct pisp_statistics stats={0}; stats.agc.histogram[v->bin]=UINT32_MAX;
         struct pisp_be_config b={0};
@@ -63,6 +64,6 @@ int main(void)
             CHECK(value-v->gain[y*3+x]<0.004 && value-v->gain[y*3+x]>-0.004);
         }
     }
-    puts("Ten-profile native temporal noise, HDR tone and spatial-grid fixtures passed");
+    puts("Native temporal noise, HDR tone and spatial-grid fixtures passed");
     return 0;
 }

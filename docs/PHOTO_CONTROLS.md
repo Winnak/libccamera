@@ -168,6 +168,6 @@ They remain **not physically AF validated**. The available OV5647 is fixed focus
 and explicitly cannot provide physical AF/PDAF acceptance. HQ/IMX477 requires
 manual focus of its attached lens; this API does not invent an actuator calibration.
 
-**IPA ABI 8 / native wire version 3:** rebuild C modules, workers and consumers
+**IPA ABI 9 / native wire version 4.** Rebuild C modules, workers and consumers
 together. Older binaries are rejected. See [building/testing](BUILDING.md) and
 the separate [Pi 4/OV5647 physical acceptance guide](PI4_OV5647.md).

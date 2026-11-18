@@ -8,7 +8,7 @@
  * the same wire/IPA ABI and native block sizes. Decode owns all reconstructed
  * pointed-to storage; object views expire on destroy. The ordinary codec does
  * no OS I/O or module execution. */
-#define CC_IPA_WIRE_VERSION 3U
+#define CC_IPA_WIRE_VERSION 4U
 #define CC_IPA_WIRE_MAX_DATA (16U * 1024U * 1024U)
 #define CC_IPA_WIRE_MAX_FDS 192U
 enum cc_ipa_wire_kind {

@@ -340,7 +340,11 @@ static void visit(struct codec *c, enum cc_ipa_wire_kind kind)
     case CC_IPA_WIRE_REFERENCE: reference(c, &value->reference); break;
     case CC_IPA_WIRE_VC4:
         FIELD(&value->vc4, mains_hz); FIELD(&value->vc4, red_gain); FIELD(&value->vc4, blue_gain);
-        FIELD(&value->vc4, profile); FIELD(&value->vc4, autofocus); break;
+        FIELD(&value->vc4, profile); FIELD(&value->vc4, autofocus);
+        FIELD(&value->vc4.lens_shading, enabled);
+        if (value->vc4.lens_shading.enabled)
+            FIELD(&value->vc4.lens_shading, gains);
+        break;
     case CC_IPA_WIRE_PHOTO_CAPABILITIES: photo_capabilities(c,&value->photo_capabilities); break;
     }
     if (!c->error && !c->decode) memcpy(c->output + fd_count_offset, &c->owner->num_fds, sizeof(uint32_t));

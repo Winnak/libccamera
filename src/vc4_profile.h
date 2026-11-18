@@ -39,10 +39,17 @@ struct cc_vc4_profile_data {
     const double *metering[3]; /* centre, spot, matrix, in native region order. */
     double wb_modes[7][2]; /* auto, incandescent, tungsten, fluorescent, indoor, daylight, cloudy. */
     const cc_af_tuning *af;
+    const double (*cac)[81]; /* PiSP corner-sampled Rx, Ry, Bx, By in sensor pixels. */
+    double cac_strength;
     struct cc_pisp_denoise_profile temporal[2]; /* normal, HDR */
     struct cc_pisp_hdr_profile hdr;
 };
 const struct cc_vc4_profile_data *cc_vc4_profile_data(enum cc_vc4_profile profile);
 const struct cc_vc4_profile_data *cc_pisp_profile_data(enum cc_vc4_profile profile);
 int cc_sensor_geometry_valid(const cc_sensor_geometry *geometry);
+int cc_rpi_lens_shading_valid(const cc_rpi_lens_shading *shading);
+double cc_rpi_sample_grid(const double *table, unsigned width, unsigned height, double x, double y);
+void cc_rpi_resample_shading(const double *table, unsigned width, unsigned height,
+    const cc_sensor_geometry *geometry, double *output, unsigned out_width, unsigned out_height);
+double cc_rpi_mode_noise_factor(const cc_sensor_geometry *geometry);
 #endif

@@ -34,12 +34,13 @@ static uint16_t field(double x, unsigned bits, unsigned frac)
 {
     return (uint16_t)clamp(x*(1U<<frac)+0.5,0,(1U<<bits)-1);
 }
-void cc_pisp_native_denoise(const struct cc_vc4_profile_data *p, double gain,
+void cc_pisp_native_denoise(const struct cc_vc4_profile_data *p, double gain, double mode_factor,
     double ratio, uint32_t frames, int hdr, struct pisp_be_config *b)
 {
     const struct cc_pisp_denoise_profile *d=&p->temporal[hdr!=0];
     double root=gain;
     for (unsigned i=0; i<16; ++i) root=(root+gain/root)*0.5;
+    root /= mode_factor;
     double backoff=1;
     for (uint32_t i=0; i<frames; ++i) backoff*=d->backoff;
     double deviation=backoff*p->sdn_deviation+(1-backoff)*d->deviation;

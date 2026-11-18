@@ -80,14 +80,55 @@ static double pwl(const double *v, size_t count, double x)
             return v[i - 1] + (v[i + 1] - v[i - 1]) * (x - v[i - 2]) / (v[i] - v[i - 2]);
     return v[count - 1];
 }
-static double sample(const double *v, double x, double y)
+double cc_rpi_sample_grid(const double *v, unsigned width, unsigned height, double x, double y)
 {
-    x = clamp(x, 0, 15);
-    y = clamp(y, 0, 11);
-    unsigned a = (unsigned)x, b = (unsigned)y, c = a < 15 ? a + 1 : a, d = b < 11 ? b + 1 : b;
+    x = clamp(x, 0, width - 1);
+    y = clamp(y, 0, height - 1);
+    unsigned a = (unsigned)x, b = (unsigned)y, c = a + 1 < width ? a + 1 : a,
+             d = b + 1 < height ? b + 1 : b;
     double u = x - a, w = y - b;
-    return (v[b * 16 + a] * (1 - u) + v[b * 16 + c] * u) * (1 - w) +
-           (v[d * 16 + a] * (1 - u) + v[d * 16 + c] * u) * w;
+    return (v[b * width + a] * (1 - u) + v[b * width + c] * u) * (1 - w) +
+           (v[d * width + a] * (1 - u) + v[d * width + c] * u) * w;
+}
+int cc_rpi_lens_shading_valid(const cc_rpi_lens_shading *shading)
+{
+    if (!shading || !shading->enabled)
+        return 1;
+    if (shading->enabled != 1)
+        return 0;
+    for (unsigned ch = 0; ch < 3; ++ch)
+        for (unsigned i = 0; i < CC_VC4_LSC_SAMPLES; ++i)
+            if (!(shading->gains[ch][i] >= 1 && shading->gains[ch][i] <= 7.99))
+                return 0;
+    return 1;
+}
+void cc_rpi_resample_shading(const double *table, unsigned width, unsigned height,
+    const cc_sensor_geometry *g, double *output, unsigned out_width, unsigned out_height)
+{
+    double minimum = DBL_MAX;
+    for (unsigned y = 0; y < out_height; ++y)
+        for (unsigned x = 0; x < out_width; ++x) {
+            double u = (x + 0.5) / out_width, v = (y + 0.5) / out_height;
+            if (g->hflip)
+                u = 1 - u;
+            if (g->vflip)
+                v = 1 - v;
+            double sx = (g->crop.x - g->active.x + u * g->crop.width) / g->active.width * width - 0.5;
+            double sy = (g->crop.y - g->active.y + v * g->crop.height) / g->active.height * height - 0.5;
+            double value = cc_rpi_sample_grid(table, width, height, sx, sy);
+            output[y * out_width + x] = value;
+            if (value < minimum)
+                minimum = value;
+        }
+    for (unsigned i = 0; i < out_width * out_height; ++i)
+        output[i] /= minimum;
+}
+double cc_rpi_mode_noise_factor(const cc_sensor_geometry *g)
+{
+    /* The reference treats up to twofold scaling on each axis as binning. */
+    int axes = (g->crop.width / g->width >= 2) + (g->crop.height / g->height >= 2);
+    static const double factors[] = {1, 1.4142135623730951, 2};
+    return factors[axes];
 }
 static struct bcm2835_isp_rational rational(double x)
 {
@@ -130,11 +171,12 @@ int cc_vc4_select_profile(const cc_sensor_model *sensor, enum cc_vc4_profile ove
     }
     return cc_vc4_lookup_profile(s->model, out) == 0 ? 0 : -ENOTSUP;
 }
-int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *g,
-                        double ct, double gain, cc_vc4_tuning *out)
+int cc_vc4_build_tuning_with_shading(enum cc_vc4_profile profile, const cc_sensor_geometry *g,
+    double ct, double gain, const cc_rpi_lens_shading *shading, cc_vc4_tuning *out)
 {
     const struct cc_vc4_profile_data *p = cc_vc4_profile_data(profile);
-    if (!p || !out || !cc_sensor_geometry_valid(g) || !(ct >= 2000 && ct <= 13000) || !(gain >= 1 && gain <= 64))
+    if (!p || !out || !cc_sensor_geometry_valid(g) || !cc_rpi_lens_shading_valid(shading) ||
+        !(ct >= 2000 && ct <= 13000) || !(gain >= 1 && gain <= 64))
         return -EINVAL;
     cc_vc4_tuning t = {0};
     t.colour_temperature = ct;
@@ -163,13 +205,15 @@ int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *g
     double root = gain;
     for (unsigned i = 0; i < 16; ++i)
         root = (root + gain / root) * 0.5;
+    double mode_factor = cc_rpi_mode_noise_factor(g);
+    root /= mode_factor;
     t.denoise = (struct bcm2835_isp_denoise){
         .enabled = 1, .constant = (uint32_t)(p->noise_constant * root * p->sdn_deviation),
         .slope = rational(p->noise_slope * root * p->sdn_deviation), .strength = rational(p->sdn_strength)};
     t.cdn = (struct bcm2835_isp_cdn){1, CDN_MODE_HIGH_QUALITY};
     t.sharpen = (struct bcm2835_isp_sharpen){
-        .enabled = 1, .threshold = rational(p->sharpen_threshold),
-        .strength = rational(p->sharpen_strength), .limit = rational(p->sharpen_limit)};
+        .enabled = 1, .threshold = rational(p->sharpen_threshold * mode_factor),
+        .strength = rational(p->sharpen_strength / mode_factor), .limit = rational(p->sharpen_limit / mode_factor)};
     t.dpc = (struct bcm2835_isp_dpc){1, DPC_MODE_NORMAL};
     unsigned li = 0;
     while (li + 2 < p->num_lsc && ct > p->lsc_ct[li + 1])
@@ -182,30 +226,17 @@ int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *g
         full[1][i] = lum;
         full[2][i] = lum / (p->lsc_b[li * 192 + i] * (1 - f) + p->lsc_b[(li + 1) * 192 + i] * f);
     }
-    for (unsigned ch = 0; ch < 3; ++ch) {
-        double minimum = DBL_MAX;
-        for (unsigned y = 0; y < 12; ++y)
-            for (unsigned x = 0; x < 16; ++x) {
-                double u = ((double)x + 0.5) / 16, v = ((double)y + 0.5) / 12;
-                if (g->hflip)
-                    u = 1 - u;
-                if (g->vflip)
-                    v = 1 - v;
-                double sx =
-                    ((double)(g->crop.x - g->active.x) + u * g->crop.width) / g->active.width * 16 - 0.5;
-                double sy =
-                    ((double)(g->crop.y - g->active.y) + v * g->crop.height) / g->active.height * 12 - 0.5;
-                double value = sample(full[ch], sx, sy);
-                t.lens_shading[ch][y * 16 + x] = value;
-                if (value < minimum)
-                    minimum = value;
-            }
-        for (unsigned i = 0; i < 192; ++i)
-            t.lens_shading[ch][i] /= minimum;
-    }
+    for (unsigned ch = 0; ch < 3; ++ch)
+        cc_rpi_resample_shading(shading && shading->enabled ? shading->gains[ch] : full[ch],
+            16, 12, g, t.lens_shading[ch], 16, 12);
     t.lens_shading_enabled = 1;
     *out = t;
     return 0;
+}
+int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *g,
+    double ct, double gain, cc_vc4_tuning *out)
+{
+    return cc_vc4_build_tuning_with_shading(profile, g, ct, gain, NULL, out);
 }
 int cc_vc4_validate_tuning(const cc_vc4_tuning *t)
 {

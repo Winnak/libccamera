@@ -194,10 +194,12 @@ static int configure(void *context, const cc_ipa_configuration *c)
         if (ret<0) return ret;
         if (raw.bayer_order==PISP_BAYER_ORDER_GREYSCALE) return -ENOTSUP;
         struct pisp_fe_config fe; struct pisp_be_config be;
-        ret = cc_pisp_build_tuning(selected, &c->geometry, 4500, 1, 1, 1, &fe, &be);
+        ret = cc_pisp_build_tuning_with_shading(selected, &c->geometry, 4500, 1, 1, 1,
+            &v->options.lens_shading, &fe, &be);
     } else {
         cc_vc4_tuning test;
-        ret = cc_vc4_build_tuning(selected, &c->geometry, 4500, 1, &test);
+        ret = cc_vc4_build_tuning_with_shading(selected, &c->geometry, 4500, 1,
+            &v->options.lens_shading, &test);
     }
     if (ret < 0)
         return ret;
@@ -384,13 +386,14 @@ static int prepare(void *context, const cc_ipa_request *request, cc_ipa_settings
     s->photo=photo;
     s->colour_temperature = v->temperature;
     if (v->pisp) {
-        ret = cc_pisp_build_tuning(p->info.profile, &v->config.geometry, v->temperature, actual_gain,
-            v->red, v->blue, &s->frontend, &s->backend);
+        ret = cc_pisp_build_tuning_with_shading(p->info.profile, &v->config.geometry, v->temperature, actual_gain,
+            v->red, v->blue, &v->options.lens_shading, &s->frontend, &s->backend);
         if (ret<0) return ret;
         cc_photo_apply_pisp(p,&photo,&s->frontend,&s->backend);
         s->flags |= CC_IPA_FRONTEND | CC_IPA_BACKEND;
     } else {
-        ret = cc_vc4_build_tuning(p->info.profile, &v->config.geometry, v->temperature, actual_gain, &s->vc4);
+        ret = cc_vc4_build_tuning_with_shading(p->info.profile, &v->config.geometry, v->temperature, actual_gain,
+            &v->options.lens_shading, &s->vc4);
         if (ret < 0)
             return ret;
         cc_photo_apply_vc4(&photo,&s->vc4);
@@ -767,7 +770,9 @@ static int create(const cc_ipa_vc4_options *options, bool pisp, cc_ipa **out)
         return -EINVAL;
     *out = NULL;
     cc_ipa_vc4_options o = options ? *options : (cc_ipa_vc4_options){.mains_hz = 50};
-    if ((o.profile != CC_VC4_PROFILE_AUTO && !cc_vc4_get_profile_info(o.profile)) ||
+    if ((o.profile != CC_VC4_PROFILE_AUTO &&
+         !(pisp ? cc_pisp_get_profile_info(o.profile) : cc_vc4_get_profile_info(o.profile))) ||
+        !cc_rpi_lens_shading_valid(&o.lens_shading) ||
         (o.autofocus>1) ||
         (o.mains_hz && o.mains_hz != 50 && o.mains_hz != 60) ||
         !((o.red_gain == 0 && o.blue_gain == 0) ||

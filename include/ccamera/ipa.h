@@ -14,7 +14,7 @@
 extern "C" {
 #endif
 
-#define CC_IPA_ABI_VERSION 8U
+#define CC_IPA_ABI_VERSION 9U
 #define CC_IPA_MAX_CONTROLS 32U
 typedef struct cc_ipa cc_ipa;
 enum cc_ipa_pipeline { CC_IPA_VC4 = 1, CC_IPA_CFE, CC_IPA_PISP, CC_IPA_VIMC };
@@ -182,10 +182,11 @@ typedef struct cc_ipa_vc4_options {
     double red_gain, blue_gain;
     enum cc_vc4_profile profile; /* AUTO (0): standard colour profile for configured sensor. */
     uint32_t autofocus; /* Opt-in calibrated IMX708 lens/PDAF/CDAF; 0 or 1. */
+    cc_rpi_lens_shading lens_shading; /* Optional measured correction, copied with options. */
 } cc_ipa_vc4_options;
 CC_API int cc_ipa_vc4_create(const cc_ipa_vc4_options *options, cc_ipa **ipa);
-/* Same module identifiers/options and manual precedence, with PiSP-specific
- * calibration, native RPFS statistics and CFE/BE blocks. Requires a complete
+/* Shared options and manual precedence, with PiSP-specific profiles,
+ * native RPFS statistics and CFE/BE blocks. Requires a complete
  * CFE/PiSP graph and live geometry; CFE crop/downscale is unsupported. */
 typedef cc_ipa_vc4_options cc_ipa_pisp_options;
 CC_API int cc_ipa_pisp_create(const cc_ipa_pisp_options *options, cc_ipa **ipa);

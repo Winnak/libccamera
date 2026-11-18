@@ -42,6 +42,17 @@ int main(int argc, char **argv)
         !cc_pisp_get_profile_info(photo_profile) ||
         cc_pisp_build_tuning(photo_profile,&photo_geometry,4500,1,1.5,2,&photo_fe,&photo_be) ||
         photo_be.wbg.gain_r!=1536 || !(photo_be.global.rgb_enables&PISP_BE_RGB_ENABLE_GAMMA)) return 1;
+    cc_rpi_lens_shading measured = {.enabled = 1};
+    for (unsigned ch = 0; ch < 3; ++ch)
+        for (unsigned i = 0; i < CC_VC4_LSC_SAMPLES; ++i)
+            measured.gains[ch][i] = 1;
+    if (cc_vc4_build_tuning_with_shading(photo_profile, &photo_geometry, 4500, 1, &measured, &photo_tuning) ||
+        photo_tuning.lens_shading[0][0] != 1 ||
+        cc_sensor_lookup("imx477", &photo_sensor) ||
+        cc_pisp_lookup_profile("imx477_6mm", &photo_profile) ||
+        cc_pisp_select_profile(photo_sensor, photo_profile, &photo_profile) ||
+        cc_pisp_build_tuning_with_shading(photo_profile, &photo_geometry, 4500, 1, 1, 1, &measured, &photo_fe, &photo_be) ||
+        !(photo_be.global.bayer_enables & PISP_BE_BAYER_ENABLE_CAC)) return 1;
     cc_ipa *photo_ipa=NULL;
     if (cc_ipa_pisp_create(NULL,&photo_ipa)) return 1;
     cc_ipa_destroy(photo_ipa);
@@ -260,7 +271,7 @@ int main(int argc, char **argv)
     if (cc_photo_validate_controls(&photo) || cc_request_set_photo_controls(NULL,&photo)!=-EINVAL ||
         cc_capture_get_photo_capabilities(NULL,&photo_caps)!=-EINVAL ||
         cc_ipa_get_photo_capabilities(NULL,&photo_caps)!=-EINVAL) return 1;
-    if (CC_IPA_ABI_VERSION!=8 || cc_camera_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
+    if (CC_IPA_ABI_VERSION!=9 || cc_camera_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
         cc_cfe_configure_embedded(NULL,&embedded_configuration)!=-EINVAL ||
         cc_capture_get_embedded_configuration(NULL,&embedded_configuration)!=-EINVAL ||
         cc_camera_export_embedded_plane(NULL,0,0)!=-EINVAL) return 1;

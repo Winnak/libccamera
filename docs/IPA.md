@@ -233,7 +233,7 @@ anti-flicker. The tool waits for settled settings and saves a PPM with optional
 matching raw/statistics and diagnostic metadata. Two-frame OV5647 delays remain
 provisional. See the [Pi bring-up and validation guide](PI4_OV5647.md).
 Physical timing and image quality still require your Pi captures. The generic
-reference controller remains available. The C IPA ABI is now version 8.
+reference controller remains available. The C IPA ABI is now version 9.
 
 Ten profiles cover standard/NoIR OV5647, V2/IMX219, HQ/IMX477 and standard/wide
 V3/IMX708. `cc_ipa_vc4_options.profile` selects an explicit module override;

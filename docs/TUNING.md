@@ -27,6 +27,8 @@ An unknown photo sensor fails with `-ENOTSUP` rather than borrowing a calibratio
 | `imx219_noir` | NoIR v2 | Trimmed grey-world | No physical validation; illumination-dependent colour |
 | `imx477` | HQ, standard colour | Calibrated Bayesian | Generic reference shading; no calibration for a particular attached lens |
 | `imx477_noir` | HQ with IR filter removed | Trimmed grey-world | Generic reference shading; no lens-specific or physical validation |
+| `imx477_6mm` | Colour HQ with the reference 6 mm lens | Calibrated Bayesian | PiSP only. Lens-specific chromatic aberration correction (CAC), generic HQ shading |
+| `imx477_16mm` | Colour HQ with the reference 16 mm lens | Calibrated Bayesian | PiSP only. Lens-specific CAC, generic HQ shading |
 | `imx708` | Standard Camera Module v3 | Calibrated Bayesian | Opt-in calibrated AF; no physical validation |
 | `imx708_noir` | Standard-lens NoIR v3 | Trimmed grey-world | No physical/AF validation; illumination-dependent colour |
 | `imx708_wide` | Wide Camera Module v3 | Calibrated Bayesian | No physical/AF validation |
@@ -38,7 +40,7 @@ Select those variants explicitly. `cc_vc4_select_profile()` checks the override
 against the actual sensor and leaves its output unchanged on failure. Enum IDs
 select static data; an override cannot name an arbitrary file. Profile info
 exposes the canonical sensor, NoIR/wide/generic-lens flags and a calibration ID
-containing the source hash. It does not claim physical validation.
+containing the source hash. PiSP also flags profiles with factory CAC.
 
 ```c
 enum cc_vc4_profile profile;
@@ -64,6 +66,25 @@ black levels use the ISP's 16-bit scale even for 10/12-bit sensor input.
 `cc_vc4_ov5647_build_tuning()` and `cc_vc4_ov5647_profile_id()` remain wrappers
 for the original standard-colour profile.
 
+## Measured lens shading
+
+Both controllers accept a measured flat-field gain grid through
+`options.lens_shading`. Set `enabled = 1` and fill all three R/G/B arrays
+with the 16×12 cell-centre gains in row-major order across the full unflipped
+sensor active area. For each colour channel, divide the brightest cell's
+black-subtracted flat-field level by each cell's black-subtracted level.
+Use a uniform, unsaturated exposure from the actual camera and lens setup.
+The accepted gain range is 1 to 7.99 on both ISPs. The controller copies the
+grid, including when created through an isolated worker.
+
+The measured grid replaces factory shading and follows the live sensor crop
+and flips. Each channel is normalized to a minimum gain of one after
+resampling. The selected module still determines black level, colour, gamma,
+denoise, sharpening and any factory CAC. The reported calibration ID identifies
+that module profile. Record the measured grid's provenance alongside it.
+Applications building native blocks directly can pass the same grid to
+`cc_vc4_build_tuning_with_shading()` or `cc_pisp_build_tuning_with_shading()`.
+
 ## Still tool
 
 ```sh
@@ -86,9 +107,11 @@ focus the physical lens and assess its shading before relying on the photograph.
 
 ## Calibration and algorithm limits
 
-Lens shading uses the reference's chroma tables and luminance strength, without
-its scene-adaptive ALSC solver. Noise follows the reference gain model at full
-resolution; a cropped/binned mode has no separately validated noise calibration.
+Factory lens shading uses the reference's chroma tables and luminance strength.
+Scene-adaptive ALSC remains outside this implementation. Noise and sharpening
+use the reference's estimated binning factor from live crop and output sizes,
+with at most twofold binning per axis. Individual modes have no physically
+validated noise calibration.
 Bayesian AWB uses a bounded synchronous CT/transverse search with each module's
 curve, bounds, sensitivities and lux priors. NoIR uses a middle-half grey-world
 average and a nominal 4500 K because grey-world cannot estimate temperature.
@@ -101,9 +124,9 @@ and filtering than upstream. Dynamic contrast, adaptive sharpening,
 HDR, preview-specific policies and individual-unit/lens calibration remain open.
 Explicit native controls and request tuning remain available.
 
-**IPA ABI is 8.** Rebuild C IPA modules, workers and application consumers together.
-The options' module override is also carried by the version-checked native wire
-codec; older workers/modules cannot be mixed with this build.
+**IPA ABI is 9 and the native wire version is 4.** Rebuild C IPA modules,
+workers and application consumers together. The wire codec carries the options'
+module selection and measured shading.
 
 ## Provenance and software checks
 
@@ -132,13 +155,20 @@ pixels, focus, DMA/cache behavior or sensor-control latency.
 
 ## Pi 5 CFE/PiSP photo path
 
-`cc_ipa_pisp_create()` connects the ten modules above to PiSP-specific calibration,
-native CFE statistics and the back-end photo pipeline. It shares module IDs and
-option layout with the VC4 controller for source compatibility; the underlying
-PiSP calibration, gamma and 32×32 shading tables are separate. Use
-`cc_pisp_select_profile()` to check the sensor/override, and
+`cc_ipa_pisp_create()` connects the 12 profiles above to PiSP-specific calibration,
+native CFE statistics and the back-end photo pipeline. The underlying PiSP
+calibration, gamma and 32×32 shading tables are separate. Use
+`cc_pisp_lookup_profile()` to resolve a name, `cc_pisp_select_profile()` to check
+the sensor/override, and
 `cc_pisp_get_profile_info()` to obtain the PiSP calibration ID. Automatic selection
 still assumes the standard-colour module, never a NoIR/wide variant.
+
+Select `imx477_6mm` or `imx477_16mm` explicitly for the matching reference HQ
+lens. Both use the archived HQ shading, with distinct factory CAC displacement
+tables. PiSP also applies factory CAC on colour standard and wide V3. The
+native tables use signed shifts in 1/32-pixel units. The port maps the full
+active-area tables to the sensor crop, reflects the displacement vectors for
+sensor flips and scales them to the sensor-mode pixel size.
 
 ```c
 cc_ipa_pisp_options options = {.mains_hz = 50, .profile = CC_VC4_PROFILE_IMX708_WIDE};
@@ -177,8 +207,8 @@ column. RPFS feedback uses its full 1024-bin/1024-zone, 16-bit statistics.
 Ordinary single-exposure denoise uses each profile's **no-TDN** deviation and strength.
 [Automatic native photo transactions](NATIVE_PHOTO.md) add calibrated temporal
 sequences and short/long HDR brackets, including internal history ownership,
-tone mapping and spatial shadow gains. Adaptive ALSC/contrast,
-CAC and mode-specific binned noise calibration remain limited as above. V3
+tone mapping and spatial shadow gains. Adaptive ALSC and contrast remain outside
+this implementation. V3
 autofocus is available through the common controls with module-specific
 calibration; physical AF validation remains unavailable. No Pi 5 hardware validation is claimed.
 
@@ -205,9 +235,12 @@ python3 tools/generate_pisp_defaults.py
 python3 tools/generate_pisp_tuning_vectors.py
 ```
 
-Fifty independent JSON arithmetic fixtures check black level, CCM, gamma,
+Sixty independent JSON arithmetic fixtures check black level, CCM, gamma,
 GEQ/noise and shading across every profile, temperature extremes, gains and crops.
-C0/D0 native builders check both outputs and packed grids. Simulated controllers
+Independent CAC fixtures check all signed shifts, crops, scaling and flips.
+C0/D0 native builders check both outputs and packed grids. Measured shading
+checks cover both controllers, including invalid data, crop/flip resampling and
+isolated-worker delivery. Simulated controllers
 check AE step response, shading-compensated Bayesian/NoIR WB with a statistics ROI, manual settings,
 startup mistrust and restart. Driver graphs cover uncompressed/PC1/PC2/PC3 inputs,
 parameter delivery, held snapshots, timeouts, cancellation and stop/start, both

@@ -7,6 +7,13 @@
 extern "C" {
 #endif
 #define CC_VC4_LSC_SAMPLES 192U
+/* Optional measured flat-field correction. Gains are R/G/B, row-major 16x12,
+ * sampled at cell centres across the full unflipped sensor active area.
+ * Each gain must be in [1, 7.99]. Zero enabled selects the profile's table. */
+typedef struct cc_rpi_lens_shading {
+    uint32_t enabled;
+    double gains[3][CC_VC4_LSC_SAMPLES];
+} cc_rpi_lens_shading;
 typedef struct cc_sensor_geometry {
     cc_rectangle active, crop;
     uint32_t width, height, hflip, vflip;
@@ -36,11 +43,13 @@ enum cc_vc4_profile {
     CC_VC4_PROFILE_IMX219, CC_VC4_PROFILE_IMX219_NOIR,
     CC_VC4_PROFILE_IMX477, CC_VC4_PROFILE_IMX477_NOIR,
     CC_VC4_PROFILE_IMX708, CC_VC4_PROFILE_IMX708_NOIR,
-    CC_VC4_PROFILE_IMX708_WIDE, CC_VC4_PROFILE_IMX708_WIDE_NOIR
+    CC_VC4_PROFILE_IMX708_WIDE, CC_VC4_PROFILE_IMX708_WIDE_NOIR,
+    CC_VC4_PROFILE_IMX477_6MM, CC_VC4_PROFILE_IMX477_16MM /* PiSP only. */
 };
 enum cc_vc4_profile_flags {
     CC_VC4_PROFILE_NOIR = 1U, CC_VC4_PROFILE_WIDE = 2U,
-    CC_VC4_PROFILE_GENERIC_LENS = 4U /* HQ: no calibration for a particular attached lens. */
+    CC_VC4_PROFILE_GENERIC_LENS = 4U, /* Factory shading is generic for HQ. */
+    CC_VC4_PROFILE_LENS_CAC = 8U /* Factory chromatic aberration correction is present. */
 };
 typedef struct cc_vc4_profile_info {
     enum cc_vc4_profile profile;
@@ -58,6 +67,10 @@ CC_API int cc_vc4_select_profile(const cc_sensor_model *sensor, enum cc_vc4_prof
  * Outputs unchanged on error. Shading is calibration-only, without adaptive ALSC. */
 CC_API int cc_vc4_build_tuning(enum cc_vc4_profile profile, const cc_sensor_geometry *geometry,
                                double temperature, double analogue_gain, cc_vc4_tuning *tuning);
+/* As above, with optional full-active-area lens shading in place of the
+ * factory shading. The measured grid is resampled for the live crop/flips. */
+CC_API int cc_vc4_build_tuning_with_shading(enum cc_vc4_profile profile, const cc_sensor_geometry *geometry,
+    double temperature, double analogue_gain, const cc_rpi_lens_shading *shading, cc_vc4_tuning *tuning);
 /* Official standard-colour OV5647 calibration, not the NoIR variant.
  * Native black/gamma values are 16-bit-scale quantities, including 10-bit input.
  * No device I/O; output stays unchanged on error. */

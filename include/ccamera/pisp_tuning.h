@@ -12,6 +12,8 @@ extern "C" {
 typedef enum cc_vc4_profile cc_rpi_profile;
 typedef cc_vc4_profile_info cc_rpi_profile_info;
 CC_API const cc_rpi_profile_info *cc_pisp_get_profile_info(cc_rpi_profile profile);
+/* Looks up a PiSP profile by exact name. Output unchanged on error. */
+CC_API int cc_pisp_lookup_profile(const char *name, cc_rpi_profile *profile);
 CC_API int cc_pisp_select_profile(const cc_sensor_model *sensor, cc_rpi_profile override,
     cc_rpi_profile *profile);
 /* Static single-exposure photo processing, no history/HDR or device I/O.
@@ -23,6 +25,11 @@ CC_API int cc_pisp_select_profile(const cc_sensor_model *sensor, cc_rpi_profile 
 CC_API int cc_pisp_build_tuning(cc_rpi_profile profile, const cc_sensor_geometry *geometry,
     double temperature, double analogue_gain, double red_gain, double blue_gain,
     struct pisp_fe_config *frontend, struct pisp_be_config *backend);
+/* As above, with optional measured shading. The PiSP back end resamples the
+ * full-active-area grid to its native resolution. */
+CC_API int cc_pisp_build_tuning_with_shading(cc_rpi_profile profile, const cc_sensor_geometry *geometry,
+    double temperature, double analogue_gain, double red_gain, double blue_gain,
+    const cc_rpi_lens_shading *shading, struct pisp_fe_config *frontend, struct pisp_be_config *backend);
 enum cc_native_photo_features { CC_NATIVE_PHOTO_TDN=1U, CC_NATIVE_PHOTO_HDR=2U };
 /* Configure native history ports before buffer allocation. Uses lossless,
  * MSB-aligned Bayer16 histories, independent of the main input packing.

@@ -13,6 +13,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 NAMES = ("ov5647", "ov5647_noir", "imx219", "imx219_noir", "imx477", "imx477_noir",
          "imx708", "imx708_noir", "imx708_wide", "imx708_wide_noir")
+PISP_LENSES = ("imx477_6mm", "imx477_16mm")
 
 
 def generate(pipeline="vc4"):
@@ -23,7 +24,8 @@ def generate(pipeline="vc4"):
              " * Regenerate: python3 tools/generate_vc4_profiles.py */",
              '#include "vc4_profile.h"']
     entries = []
-    for name in NAMES:
+    hq_arrays = {}
+    for name in NAMES + (PISP_LENSES if pisp else ()):
         raw = (ROOT / "data" / f"{name}-{pipeline}.json").read_bytes()
         a = {k: v for item in json.loads(raw)["algorithms"] for k, v in item.items()}
         digest = hashlib.sha256(raw).hexdigest()
@@ -40,6 +42,11 @@ def generate(pipeline="vc4"):
             symbol = f"{name}_{key}"
             # Put table rows on separate lines to keep generated data inspectable.
             value = c(values) if len(shape) == 1 else "{\n    " + ",\n    ".join(c(x) for x in values) + "\n}"
+            if pisp and (name == "imx477" or name in PISP_LENSES):
+                # The lens profiles share most of the stock HQ calibration.
+                previous = hq_arrays.setdefault((key, value), symbol)
+                if previous != symbol:
+                    return previous
             lines.append(f"static const double {symbol}{''.join(f'[{n}]' for n in shape)} = {value};")
             return symbol
 
@@ -144,7 +151,13 @@ def generate(pipeline="vc4"):
             "lux_reference": a["rpi.lux"]["reference_lux"],
         }
         fields.update({k: str(v) for k, v in scalars.items()})
+        cac = a.get("rpi.cac")
         if pisp:
+            if cac:
+                shifts = [cac[key] for key in ("lut_rx", "lut_ry", "lut_bx", "lut_by")]
+                assert all(len(axis) == 81 for axis in shifts)
+                fields["cac"] = array("cac", shifts)
+                fields["cac_strength"] = str(cac.get("strength", 1))
             temporal = []
             for mode in ("normal", "hdr"):
                 denoise = a["rpi.denoise"][mode]
@@ -158,12 +171,18 @@ def generate(pipeline="vc4"):
             h = a["rpi.hdr"]["MultiExposure"]
             assert h["cadence"] == [1, 2] and h["stitch_enable"] == h["tonemap_enable"] == 1
             assert "spatial_gain_curve" not in h
+            spatial_gain = h.get("spatial_gain", 1)
+            # libcamera reads spatial_gain as a scalar, defaulting to 2 for
+            # the sequence in the archived imx477_16mm profile.
+            if isinstance(spatial_gain, list):
+                spatial_gain = 2
             values = [h.get("threshold_lo", 50000), h.get("detail_constant", 0), h.get("diff_power", 13),
                       h.get("motion_threshold", 0.005), h.get("detail_slope", 0),
-                      h.get("iir_strength", 8), h.get("strength", 1.5), h.get("spatial_gain", 1),
+                      h.get("iir_strength", 8), h.get("strength", 1.5), spatial_gain,
                       min(h.get("diffusion", 3), 15)]
             fields["hdr"] = "{" + ",".join(str(v) for v in values) + "}"
-        flags = (1 if "noir" in name else 0) | (2 if "wide" in name else 0) | (4 if name.startswith("imx477") else 0)
+        flags = ((1 if "noir" in name else 0) | (2 if "wide" in name else 0) |
+                 (4 if name.startswith("imx477") else 0) | (8 if cac else 0))
         entries.append("    {\n        .info = {CC_VC4_PROFILE_" + name.upper() +
                        f', "{name}", "{name.split("_")[0]}", "{name}-{pipeline}-{digest[:12]}-calibration-v1", {flags}' + "},\n" +
                        "\n".join(f"        .{key} = {value}," for key, value in fields.items()) + "\n    }")

@@ -3191,6 +3191,11 @@ static void test_embedded_af_graph(bool calibrated)
         OK(cc_capture_queue(capture,requests[0])); OK(cc_capture_dequeue(capture,&out,0)); CHECK(out==requests[0]);
         const cc_capture_result *result=cc_request_get_result(out);
         CHECK(result->status==CC_REQUEST_COMPLETE && result->embedded.num_planes==1);
+        if (calibrated) {
+            const struct pisp_be_tiles_config *params = result->backend_parameters.planes[0].data;
+            CHECK(params->config.global.bayer_enables & PISP_BE_BAYER_ENABLE_CAC);
+            CHECK(params->config.cac.grid_step_x && params->config.cac.grid_step_y);
+        }
         CHECK(result->embedded.timestamp_ns==result->raw.timestamp_ns && result->embedded.sequence==result->raw.sequence+5000);
         CHECK((result->ipa.flags&(CC_IPA_METADATA_SENSOR|CC_IPA_METADATA_PDAF))==(CC_IPA_METADATA_SENSOR|CC_IPA_METADATA_PDAF));
         CHECK(result->ipa.sensor_status.exposure_lines==20 && result->ipa.sensor_status.analogue_gain_code==0 &&
@@ -3318,7 +3323,10 @@ static void test_vc4_photo_graph(void)
     d.vc4=open_isp(&f); configure(d.vc4); uint32_t count=3;
     OK(cc_camera_allocate_buffers(d.camera,&count)); count=3; OK(cc_vc4_isp_allocate_buffers(d.vc4,&count));
     cc_capture *capture; OK(cc_capture_create(&d,&capture,&count)); OK(cc_capture_configure_sensor_defaults(capture));
-    cc_ipa *ipa; cc_ipa_vc4_options options={.red_gain=1,.blue_gain=1};
+    cc_ipa *ipa; cc_ipa_vc4_options options={.red_gain=1,.blue_gain=1,.lens_shading.enabled=1};
+    for (unsigned ch=0; ch<3; ++ch)
+        for (unsigned i=0; i<CC_VC4_LSC_SAMPLES; ++i)
+            options.lens_shading.gains[ch][i]=1;
     if (proxy_worker) {
         cc_ipa_proxy_options proxy={.worker_path=proxy_worker}; OK(cc_ipa_vc4_create_proxy(&options,&proxy,&ipa));
     } else OK(cc_ipa_vc4_create(&options,&ipa));
@@ -3337,6 +3345,11 @@ static void test_vc4_photo_graph(void)
         CHECK(r->ipa.exposure_ns==80000 && r->ipa.analogue_gain==2 && r->ipa.red_gain==1.5 && r->ipa.blue_gain==2);
         CHECK(r->ipa.photo.brightness==0.2 && f.last_gamma.y[0]>13000);
         CHECK(r->ipa.photo_status & CC_PHOTO_STATS_TRUSTED);
+        CHECK(f.last_shading.enabled && f.shading_map);
+        const uint16_t *gains = f.shading_map;
+        size_t samples = 4U * f.last_shading.grid_stride * f.last_shading.grid_height;
+        for (size_t sample=0; sample<samples; ++sample)
+            CHECK(gains[sample]==1024);
         OK(cc_capture_release(capture,out));
     }
     /* Native override domains are explicitly marked, with actual WB reported. */

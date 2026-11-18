@@ -125,7 +125,7 @@ The exposure bracket is a bounded still-photo policy using the existing normal
 AE curve, rather than the reference's continuous multi-channel AGC cadence.
 
 Independent Python/JSON fixtures check gain-dependent temporal noise, SDN/CDN
-ramps and native histogram tone LUTs across all ten profiles. Driver simulations
+ramps and native histogram tone LUTs across all 12 PiSP profiles. Driver simulations
 check exposure delays, stages, history ownership, timeout continuation, restart,
 native-port failures and grouped cancellation, with both local and isolated
 controllers. They inspect native jobs and ownership; they do not establish

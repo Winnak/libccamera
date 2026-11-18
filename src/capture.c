@@ -79,6 +79,7 @@ struct cc_capture {
     size_t num_default_identities;
     cc_ipa *ipa;
     bool ipa_running;
+    double ipa_noise_factor;
     cc_control_info lens_range;
     bool lens_current_valid;
     int32_t lens_current;
@@ -1199,7 +1200,7 @@ static int native_tuning(cc_capture *c, cc_request *r)
                 native_stale(c,r,n->previous,1);
         }
         if (reset) { n->history_frames=0; ratio=1; ++n->status.temporal_resets; }
-        cc_pisp_native_denoise(n->profile,gain,ratio,n->history_frames,
+        cc_pisp_native_denoise(n->profile,gain,c->ipa_noise_factor,ratio,n->history_frames,
             (r->native_options.features&CC_NATIVE_PHOTO_HDR)!=0,&w->be);
         if (!reset) native_pin(r,0,n->previous,CC_CAPTURE_TDN_OUTPUT);
     }
@@ -1329,6 +1330,7 @@ int cc_capture_set_ipa(cc_capture *c, cc_ipa **ipa)
     if (!c || (ipa && !*ipa)) return -EINVAL;
     if (c->dead) return -ENODEV;
     if (c->owned || c->started || c->ipa_running) return -EBUSY;
+    double noise_factor = 1;
     if (ipa) {
         if (*ipa == c->ipa) return -EINVAL;
         if (c->sensor_mode == SENSOR_EXPLICIT) return -EBUSY;
@@ -1341,11 +1343,14 @@ int cc_capture_set_ipa(cc_capture *c, cc_ipa **ipa)
             if (!ret) { c->policy=caps.policy; c->policy_seen=false; }
         }
         if (ret < 0) return ret;
+        if (configuration.pipeline == CC_IPA_PISP && cc_sensor_geometry_valid(&configuration.geometry))
+            noise_factor = cc_rpi_mode_noise_factor(&configuration.geometry);
     }
     if (!c->policy_custom && (!ipa || !(cc_ipa_get_capabilities(*ipa) & CC_IPA_CAP_PHOTO))) {
         c->policy=(cc_sensor_mode_policy){0}; c->policy_seen=false;
     }
     cc_ipa_destroy(c->ipa); c->ipa = ipa ? *ipa : NULL;
+    c->ipa_noise_factor = noise_factor;
     if (ipa) *ipa = NULL;
     return 0;
 }
