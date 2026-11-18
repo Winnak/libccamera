@@ -18,6 +18,7 @@
 #include <ccamera/uvc.h>
 #include <ccamera/monitor.h>
 #include <ccamera/configuration.h>
+#include <ccamera/still.h>
 #include <ccamera/linux/bcm2835-isp.h>
 #include <errno.h>
 #include <stdio.h>
@@ -25,6 +26,11 @@
 
 int main(int argc, char **argv)
 {
+    cc_still_configuration still = {.buffer_count = 42};
+    cc_capture *still_capture = NULL;
+    if (cc_still_open(NULL, NULL, &still_capture, &still) != -EINVAL || still_capture ||
+        cc_still_open_by_id(NULL, NULL, &still_capture, &still) != -EINVAL || still_capture ||
+        still.buffer_count != 42) return 1;
     const cc_sensor_model *photo_sensor;
     enum cc_vc4_profile photo_profile;
     if (cc_sensor_lookup("imx708", &photo_sensor) ||

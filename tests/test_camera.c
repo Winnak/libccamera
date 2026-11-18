@@ -5,6 +5,7 @@
 #include <ccamera/configuration.h>
 #include "subdev_compat.h"
 #include <ccamera/capture.h>
+#include <ccamera/still.h>
 #include "media_v2_driver.h"
 #include "uvc_profiles.h"
 
@@ -3229,8 +3230,42 @@ static void test_raw_role_configuration(void)
     }
 }
 
+static void test_still_native(bool multiplanar)
+{
+    struct fake f = fake_new(false, multiplanar);
+    f.clean_frames = true;
+    const struct cc_io io = {&fake_ops, &f};
+    const cc_camera_info info = camera_info(false);
+    const cc_still_options options = {.fourcc = V4L2_PIX_FMT_RGB24, .width = 60, .height = 30};
+    cc_capture *capture = NULL;
+    cc_still_configuration config;
+    OK(cc_still_open_io(&info, multiplanar ? &options : NULL, &io, &capture, &config));
+    CHECK(config.format.width == 64 && config.format.height == 32 && config.format.fourcc == f.active.fourcc);
+    CHECK(config.stream == CC_CAPTURE_RAW && config.buffer_count == f.force_count && !config.orientation);
+    cc_photo_capabilities caps;
+    ERROR(cc_capture_get_photo_capabilities(capture, &caps), ENOTSUP);
+    cc_request *request, *out = NULL;
+    OK(cc_request_create(1, &request));
+    OK(cc_capture_queue(capture, request));
+    OK(cc_capture_dequeue(capture, &out, 0));
+    CHECK(out == request);
+    const cc_capture_result *result = cc_request_get_result(out);
+    CHECK(result->status == CC_REQUEST_COMPLETE && !result->ipa.flags);
+    CHECK(result->raw.num_planes == (multiplanar ? 2U : 1U) && result->raw.planes[0].data);
+    OK(cc_capture_release(capture, request));
+    cc_capture_close(capture);
+    OK(cc_request_destroy(request));
+    CHECK(f.opened == f.closed && !f.live_maps);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "still")) {
+        test_still_native(false);
+        test_still_native(true);
+        puts("Native still defaults, adjusted layouts and mapped planes passed");
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "proxy-feedback")) {
         proxy_worker = argv[2]; int ret = proxy_available(); if (ret == 77) return ret; OK(ret);
         test_ipa_cfe_feedback();

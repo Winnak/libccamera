@@ -947,11 +947,18 @@ static int prepare_fences(cc_capture *c)
     }
     return 0;
 }
+void cc_capture_devices_close(cc_capture_devices *devices)
+{
+    cc_pisp_be_close(devices->backend);
+    cc_vc4_isp_close(devices->vc4);
+    cc_cfe_close(devices->frontend);
+    cc_camera_close(devices->camera);
+    *devices = (cc_capture_devices){0};
+}
 static void close_devices(cc_capture *c)
 {
-    cc_pisp_be_close(c->devices.backend); cc_vc4_isp_close(c->devices.vc4);
-    cc_cfe_close(c->devices.frontend); cc_camera_close(c->devices.camera);
-    c->devices = (cc_capture_devices) {0}; c->dead = true;
+    cc_capture_devices_close(&c->devices);
+    c->dead = true;
 }
 static int halt(cc_capture *c, cc_request *failed, int error)
 {

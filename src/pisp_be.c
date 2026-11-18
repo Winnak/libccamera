@@ -3,10 +3,8 @@
 #include "pisp_format.h"
 #include "pisp_tiling.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -105,13 +103,8 @@ static int open_port(cc_pisp_be *be, size_t port)
     return 0;
 }
 
-int cc_pisp_be_open_io(const char *path, const struct cc_io *io, cc_pisp_be **out)
+static int open_be(const char *path, const struct cc_io *io, cc_pisp_be **out)
 {
-    if (!out)
-        return -EINVAL;
-    *out = NULL;
-    if (!path || !io)
-        return -EINVAL;
     cc_pisp_be *be = calloc(1, sizeof(*be));
     if (!be)
         return -ENOMEM;
@@ -136,34 +129,36 @@ fail:
     return ret;
 }
 
-int cc_pisp_be_open(const char *media_path, cc_pisp_be **out)
+int cc_pisp_be_open_io(const char *media_path, const struct cc_io *io, cc_pisp_be **out)
 {
     if (!out)
         return -EINVAL;
     *out = NULL;
+    if (!io)
+        return -EINVAL;
     if (media_path)
-        return cc_pisp_be_open_io(media_path, &cc_system_io, out);
-    struct dirent **nodes = NULL;
-    int count = scandir("/dev", &nodes, NULL, alphasort);
-    if (count < 0)
-        return -errno;
-    int ret = -ENODEV;
-    for (int i = 0; i < count; ++i) {
-        const char *name = nodes[i]->d_name;
-        if (strncmp(name, "media", 5) || !name[5] || strspn(name + 5, "0123456789") != strlen(name + 5))
+        return open_be(media_path, io, out);
+    char **nodes;
+    size_t count;
+    int ret = cc_scan_nodes_io(io, &nodes, &count);
+    if (ret < 0)
+        return ret;
+    ret = -ENODEV;
+    for (size_t i = 0; i < count; ++i) {
+        if (strncmp(nodes[i], "/dev/media", 10))
             continue;
-        char path[CC_PATH_MAX];
-        int n = snprintf(path, sizeof(path), "/dev/%s", name);
-        if (n < 0 || (size_t)n >= sizeof(path))
-            continue;
-        int candidate = cc_pisp_be_open_io(path, &cc_system_io, out);
+        int candidate = open_be(nodes[i], io, out);
         if (!candidate || candidate == -ENOMEM) { ret = candidate; break; }
         if (candidate != -ENODEV && candidate != -ENOTSUP && candidate != -ENOENT)
             ret = candidate;
     }
-    for (int i = 0; i < count; ++i) free(nodes[i]);
-    free(nodes);
+    cc_free_nodes(nodes, count);
     return ret;
+}
+
+int cc_pisp_be_open(const char *media_path, cc_pisp_be **out)
+{
+    return cc_pisp_be_open_io(media_path, &cc_system_io, out);
 }
 
 static bool same_layout(const cc_format *a, const cc_format *b)

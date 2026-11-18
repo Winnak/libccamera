@@ -71,6 +71,15 @@ int cc_media_lens(struct cc_media *media, uint32_t sensor, struct cc_entity **le
 int cc_camera_open_io(const cc_camera_info *info, const struct cc_io *io, cc_camera **out);
 int cc_enumerate_media_io(const struct cc_io *io, const char *path, cc_camera_info **list, size_t *count);
 int cc_enumerate_io(const struct cc_io *io, cc_camera_info **list, size_t *count);
+int cc_scan_nodes_io(const struct cc_io *io, char ***nodes, size_t *count);
+void cc_free_nodes(char **nodes, size_t count);
+struct cc_still_options;
+struct cc_still_configuration;
+struct cc_capture;
+struct cc_capture_devices;
+int cc_still_open_io(const cc_camera_info *camera, const struct cc_still_options *options,
+                     const struct cc_io *io, struct cc_capture **capture, struct cc_still_configuration *configuration);
+void cc_capture_devices_close(struct cc_capture_devices *devices);
 int cc_camera_open_id_io(const char *id, const struct cc_io *io, cc_camera **camera);
 int cc_cfe_open_id_io(const char *id, const struct cc_io *io, cc_cfe **cfe);
 int cc_camera_find_id_io(const char *id, const struct cc_io *io, cc_camera_info *info);

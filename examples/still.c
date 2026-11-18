@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
+#include "ppm.h"
 #include <ccamera/capture.h>
 #include <ccamera/configuration.h>
 #include <dirent.h>
@@ -53,30 +54,6 @@ static int write_payload(FILE *out, const cc_frame *frame)
             return -EIO;
     }
     return 0;
-}
-static int ppm(const char *path, const cc_frame *frame, const cc_format *format)
-{
-    if (frame->num_planes != 1 || format->fourcc != V4L2_PIX_FMT_RGB24)
-        return -ENOTSUP;
-    const cc_plane *p = &frame->planes[0];
-    uint64_t last = (uint64_t)(format->height - 1) * format->planes[0].stride + (uint64_t)format->width * 3;
-    if (!p->data || p->data_offset > p->bytes_used || p->bytes_used > p->length ||
-        last > p->bytes_used - p->data_offset)
-        return -EPROTO;
-    FILE *out = fopen(path, "wb");
-    if (!out)
-        return -errno;
-    int ret = fprintf(out, "P6\n%u %u\n255\n", format->width, format->height) < 0 ? -EIO : 0;
-    for (uint32_t y = 0; !ret && y < format->height; ++y) {
-        const unsigned char *bytes =
-            (const unsigned char *)p->data + p->data_offset + (size_t)y * format->planes[0].stride;
-        size_t n = (size_t)format->width * 3;
-        if (fwrite(bytes, 1, n, out) != n)
-            ret = -EIO;
-    }
-    if (fclose(out) && !ret)
-        ret = -EIO;
-    return ret;
 }
 static int disable_auto(cc_camera *camera)
 {

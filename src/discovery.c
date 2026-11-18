@@ -142,7 +142,7 @@ int cc_enumerate_media_io(const struct cc_io *io, const char *path, cc_camera_in
     return enumerate_media(io,path,list,count,NULL);
 }
 
-static void free_nodes(char **nodes, size_t count)
+void cc_free_nodes(char **nodes, size_t count)
 {
     for (size_t i=0; i<count; ++i) free(nodes[i]);
     free(nodes);
@@ -167,8 +167,30 @@ static int scan_nodes(char ***out, size_t *count)
     }
     for (int i=0; i<num; ++i) free(entries[i]);
     free(entries);
-    if (ret<0) { free_nodes(nodes,used); return ret; }
+    if (ret<0) { cc_free_nodes(nodes,used); return ret; }
     *out=nodes; *count=used;
+    return 0;
+}
+
+int cc_scan_nodes_io(const struct cc_io *io, char ***out, size_t *count)
+{
+    char **nodes=NULL;
+    size_t num=0;
+    int ret;
+    if (io->ops->scan_nodes) ret=io->ops->scan_nodes(io->ctx,&nodes,&num);
+    else if (io->ops==cc_system_io.ops) ret=scan_nodes(&nodes,&num);
+    else return -ENOTSUP;
+    if (ret>0 || (!ret && num && !nodes)) ret=-EPROTO;
+    for (size_t i=0; !ret && i<num; ++i) {
+        if (!nodes[i] || strnlen(nodes[i],CC_PATH_MAX)==CC_PATH_MAX || strncmp(nodes[i],"/dev/",5) ||
+            (!numbered_node(nodes[i]+5,"media") && !numbered_node(nodes[i]+5,"video"))) ret=-EPROTO;
+        for (size_t j=0; !ret && j<i; ++j) if (!strcmp(nodes[i],nodes[j])) ret=-EPROTO;
+    }
+    if (ret<0) {
+        if (nodes) cc_free_nodes(nodes,num);
+        return ret;
+    }
+    *out=nodes; *count=num;
     return 0;
 }
 
@@ -203,26 +225,17 @@ int cc_enumerate_state_io(const struct cc_io *io, cc_camera_info **cameras, size
     if (!io || !io->ops || !cameras || !count) return -EINVAL;
     *cameras=NULL; *count=0;
     if (pending) *pending=false;
-    char **nodes=NULL;
-    size_t num=0;
-    int ret;
-    if (io->ops->scan_nodes) ret=io->ops->scan_nodes(io->ctx,&nodes,&num);
-    else if (io->ops==cc_system_io.ops) ret=scan_nodes(&nodes,&num);
-    else return -ENOTSUP;
-    if (ret) { if (ret>0) ret=-EPROTO; goto done; }
-    if (num && !nodes) { ret=-EPROTO; goto done; }
-    for (size_t i=0; i<num; ++i) {
-        if (!nodes[i] || strnlen(nodes[i],CC_PATH_MAX)==CC_PATH_MAX || strncmp(nodes[i],"/dev/",5) ||
-            (!numbered_node(nodes[i]+5,"media") && !numbered_node(nodes[i]+5,"video"))) { ret=-EPROTO; goto done; }
-        for (size_t j=0; j<i; ++j) if (!strcmp(nodes[i],nodes[j])) { ret=-EPROTO; goto done; }
-    }
+    char **nodes;
+    size_t num;
+    int ret=cc_scan_nodes_io(io,&nodes,&num);
+    if (ret<0) return ret;
     for (unsigned phase=0; phase<2; ++phase) for (size_t i=0; i<num; ++i) {
         if (!numbered_node(nodes[i]+5,phase ? "video":"media")) continue;
         ret=phase ? enumerate_video(io,nodes[i],cameras,count,pending):enumerate_media(io,nodes[i],cameras,count,pending);
         if (ret<0) goto done;
     }
 done:
-    if (nodes) free_nodes(nodes,num);
+    cc_free_nodes(nodes,num);
     if (ret<0) { free(*cameras); *cameras=NULL; *count=0; }
     return ret;
 }

@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "internal.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -77,13 +76,8 @@ static struct cc_entity *named_entity(struct cc_media *media, const char *name)
     return NULL;
 }
 
-int cc_vc4_isp_open_io(const char *path, const struct cc_io *io, cc_vc4_isp **out)
+static int open_isp(const char *path, const struct cc_io *io, cc_vc4_isp **out)
 {
-    if (!out)
-        return -EINVAL;
-    *out = NULL;
-    if (!path || !io)
-        return -EINVAL;
     cc_vc4_isp *isp = calloc(1, sizeof(*isp));
     if (!isp)
         return -ENOMEM;
@@ -138,36 +132,37 @@ fail:
     return ret;
 }
 
-int cc_vc4_isp_open(const char *media_path, cc_vc4_isp **out)
+int cc_vc4_isp_open_io(const char *media_path, const struct cc_io *io, cc_vc4_isp **out)
 {
     if (!out)
         return -EINVAL;
     *out = NULL;
+    if (!io)
+        return -EINVAL;
     if (media_path)
-        return cc_vc4_isp_open_io(media_path, &cc_system_io, out);
-    struct dirent **nodes = NULL;
-    int count = scandir("/dev", &nodes, NULL, alphasort);
-    if (count < 0)
-        return -errno;
-    int ret = -ENODEV;
-    for (int i = 0; i < count; ++i) {
-        const char *name = nodes[i]->d_name;
-        if (strncmp(name, "media", 5) || !name[5] || strspn(name + 5, "0123456789") != strlen(name + 5))
+        return open_isp(media_path, io, out);
+    char **nodes;
+    size_t count;
+    int ret = cc_scan_nodes_io(io, &nodes, &count);
+    if (ret < 0)
+        return ret;
+    ret = -ENODEV;
+    for (size_t i = 0; i < count; ++i) {
+        if (strncmp(nodes[i], "/dev/media", 10))
             continue;
-        char path[CC_PATH_MAX];
-        int n = snprintf(path, sizeof(path), "/dev/%s", name);
-        if (n < 0 || (size_t)n >= sizeof(path))
-            continue;
-        int candidate = cc_vc4_isp_open_io(path, &cc_system_io, out);
+        int candidate = open_isp(nodes[i], io, out);
         if (!candidate) { ret = 0; break; }
         if (candidate == -ENOMEM) { ret = candidate; break; }
         if (candidate != -ENODEV && candidate != -ENOTSUP && candidate != -ENOENT)
             ret = candidate;
     }
-    for (int i = 0; i < count; ++i)
-        free(nodes[i]);
-    free(nodes);
+    cc_free_nodes(nodes, count);
     return ret;
+}
+
+int cc_vc4_isp_open(const char *media_path, cc_vc4_isp **out)
+{
+    return cc_vc4_isp_open_io(media_path, &cc_system_io, out);
 }
 
 static bool same_input(const cc_format *source, const cc_format *input)

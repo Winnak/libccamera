@@ -625,6 +625,65 @@ values or fail. The native `get_configuration` getters copy applied layouts,
 including metadata, without requiring allocated buffers; they return `-EPIPE`
 before configuration or after invalidation.
 
+## Still photographs
+
+Use [`ccamera/still.h`](../include/ccamera/still.h) to open a camera from
+`cc_enumerate` or by its discovery ID. One call opens the source, selects
+VC4 for Unicam or PiSP for CFE, negotiates a single image stream, and allocates
+the internal buffer pools. On Pi it attaches the built-in calibrated AE/AWB
+controller, using the sensor's delay and startup policies. UVC, VIMC and
+self-contained V4L2 cameras deliver native video with their existing device
+controls.
+
+```c
+#include <ccamera/still.h>
+
+/* camera is the chosen entry from cc_enumerate(). */
+cc_still_options wanted = {
+    .fourcc = CC_FOURCC('R', 'G', 'B', '3'),
+    .width = 1280,
+    .height = 720,
+};
+cc_still_configuration actual;
+cc_capture *capture = NULL;
+int ret = cc_still_open(camera, &wanted, &capture, &actual);
+```
+
+Pass `NULL` for default options. On Pi the default request is YUV420 at the
+largest advertised sensor size, with an upright orientation when supported.
+On native video the defaults come from the device's current format and size.
+Set both dimensions to request a different size. The driver may adjust the
+layout or reject an unsupported request. Use `actual.format` to read the image
+and `actual.orientation` to handle a Pi orientation that the sensor could not
+apply. The default Pi profile is the standard colour module for the detected
+sensor. Set `profile` explicitly for a matching NoIR, wide or HQ lens variant.
+An unsupported Pi sensor or profile returns an error. The calibrated controller
+defaults to 50 Hz anti-flicker. Use `cc_request_set_photo_controls` to request
+60 Hz, disable anti-flicker or set other [photographic controls](PHOTO_CONTROLS.md).
+
+On success, create and [queue a request](#capture-requests), then dequeue it
+with a deadline and check the returned result's status. `actual.stream` selects
+the image in the result:
+
+| Stream | Image |
+| --- | --- |
+| `CC_CAPTURE_OUTPUT0` | `result->output[0]` (VC4) |
+| `CC_CAPTURE_OUTPUT1` | `result->output[1]` (PiSP) |
+| `CC_CAPTURE_RAW` | `result->raw` (native video image, in the negotiated format) |
+
+Allow AE and AWB to settle by releasing and requeueing requests. The
+`CC_IPA_AE_CONVERGED` and `CC_IPA_AWB_CONVERGED` flags indicate convergence
+when reported by the controller. Consume or copy the mapped planes before
+releasing the result. The application handles encoding and writing. Destroy
+requests and close the graph with `cc_capture_close`. Closing the graph also
+detaches outstanding requests so they can be destroyed after errors or timeouts.
+
+The [`ccamera-photo` example](../examples/photo.c) requests RGB24 and saves a
+PPM after up to 16 completed frames on Pi. Use the [stream-role](#stream-roles)
+and [request buffer](#capture-requests) APIs for explicit graph construction,
+caller-owned DMA-BUFs or additional streams. The
+[Pi 4B / OV5647 guide](PI4_OV5647.md) covers hardware acceptance and diagnostics.
+
 ## Stream roles
 
 [`ccamera/configuration.h`](../include/ccamera/configuration.h) generates,

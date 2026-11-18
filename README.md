@@ -78,9 +78,18 @@ Discover cameras and inspect the modes of a selected camera:
 ./build/ccamera-capture -c 0 -m
 ```
 
-Choose the index reported by discovery. The [capture guide](docs/CAPTURE.md)
-covers capture, buffer ownership and queued requests. For still photographs
-with a Pi 4B and Camera Module v1.3, follow the
+Choose the index reported by discovery. To capture a PPM from a camera that
+supports RGB24:
+
+```sh
+./build/ccamera-photo -c 0 photo.ppm
+./build/ccamera-photo -c 0 -W 1280 -H 720 small.ppm
+```
+
+The [still-capture API](docs/CAPTURE.md#still-photographs) selects the Raspberry
+Pi processor and calibrated tuning, negotiates the image layout and allocates
+buffers. Native video cameras use their device controls and formats. For Pi 4B
+and Camera Module v1.3 hardware acceptance, use the
 [OV5647 bring-up and validation guide](docs/PI4_OV5647.md).
 
 The listing also reports camera IDs when available. Use `-I 'ID'` instead of
@@ -93,9 +102,9 @@ Native CFE/VC4/PiSP configurations also support
 [read-only TRY validation](docs/CAPTURE.md#read-only-pipeline-validation) before
 applying formats or allocating buffers. The [stream-role layer](docs/CAPTURE.md#stream-roles)
 generates defaults, negotiates sensor/output formats and applies a complete plan
-to supplied devices; `ccamera-still` uses it for the supported VC4 profiles.
-Use `--list-profiles` to inspect them and `--profile NAME` to select a NoIR/wide
-module explicitly. Sensor identity alone cannot distinguish those variants.
+to supplied devices. Select a NoIR, wide or supported HQ lens variant with
+`ccamera-photo -p NAME`. See the [module profile list](docs/TUNING.md).
+`ccamera-still` provides the VC4 diagnostics described in the OV5647 guide.
 
 The public API starts at [ccamera/ccamera.h](include/ccamera/ccamera.h), with
 complete examples in [examples/](examples/). To use an installed library:

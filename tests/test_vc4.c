@@ -6,6 +6,7 @@
 #include "fence.h"
 #include <ccamera/capture.h>
 #include <ccamera/configuration.h>
+#include <ccamera/still.h>
 #include <ccamera/ipa_module.h>
 #include <ccamera/ipa_manager.h>
 #include <ccamera/linux/bcm2835-isp.h>
@@ -101,7 +102,7 @@ struct fake {
     int32_t blue_gain, digital_gain;
     bool ipa_scene;
     bool timing_plan;
-    bool photo_profile;
+    bool photo_profile, ov5647;
     bool clamp_photo_wb;
     unsigned char payload[8];
     void *last_input;
@@ -475,6 +476,7 @@ static struct media_entity_desc cfe_entity(const struct fake *f,uint32_t id)
     CHECK(id>=1 && id<=7);
     struct media_entity_desc d={.id=id,.type=functions[id-1],.pads=pads[id-1],.links=links[id-1]};
     strcpy(d.name,names[id-1]); d.dev.major=81; d.dev.minor=minors[id-1];
+    if (f->ov5647 && id==1) strcpy(d.name,"ov5647 10-0036");
     if (f->unicam && id==2) strcpy(d.name,"unicam-image");
     if (f->embedded && id==1) { d.pads=2; ++d.links; strcpy(d.name,"imx708 10-001a"); }
     if (f->embedded && id==3) d.links+=2;
@@ -538,7 +540,10 @@ static int cfe_sensor_controls(struct fake *f, unsigned long req, void *arg)
             q->minimum=1;
             if (f->timing_plan) q->maximum=(int64_t)f->nodes[f->unicam ? 7:4].format.height+f->vblank-4;
             break;
-        case V4L2_CID_ANALOGUE_GAIN: q->maximum=240; break;
+        case V4L2_CID_ANALOGUE_GAIN:
+            q->minimum = f->ov5647 ? 16 : 0;
+            q->maximum = 240;
+            break;
         case V4L2_CID_HFLIP: case V4L2_CID_VFLIP:
             if (!f->photo_profile) return -EINVAL;
             q->type=V4L2_CTRL_TYPE_BOOLEAN; q->maximum=1; q->flags=V4L2_CTRL_FLAG_READ_ONLY; break;
@@ -3857,8 +3862,103 @@ static void test_processed_roles(bool pisp)
     }
 }
 
+static int still_nodes(void *ctx, char ***out, size_t *count)
+{
+    (void)ctx;
+    const char *paths[] = {"/dev/video7", "/dev/media2", "/dev/media1", "/dev/media0"};
+    *count = sizeof(paths) / sizeof(paths[0]);
+    *out = calloc(*count, sizeof(**out));
+    CHECK(*out);
+    for (size_t i = 0; i < *count; ++i) {
+        (*out)[i] = strdup(paths[i]);
+        CHECK((*out)[i]);
+    }
+    return 0;
+}
+
+static void test_still_pi(bool pisp)
+{
+    struct fake f;
+    init(&f);
+    f.cfe = f.photo_profile = f.timing_plan = f.physical_array_larger = true;
+    f.pisp = pisp;
+    f.unicam = f.ov5647 = f.shading_test = f.ipa_scene = !pisp;
+    f.analogue_gain = pisp ? 0 : 16;
+    f.exposure = 20;
+    f.mbus[0][0][0] = f.mbus[0][1][0] = (struct v4l2_mbus_framefmt) {
+        .code = MEDIA_BUS_FMT_SRGGB10_1X10, .width = 128, .height = 96,
+        .field = V4L2_FIELD_NONE, .colorspace = V4L2_COLORSPACE_RAW,
+    };
+    struct cc_io_ops still_ops = ops;
+    still_ops.scan_nodes = still_nodes;
+    const struct cc_io io = {&still_ops, &f};
+    const cc_camera_info info = {
+        .pipeline = pisp ? CC_PIPELINE_RPI_CFE : CC_PIPELINE_RPI_UNICAM,
+        .media_path = "/dev/media1", .video_path = "/dev/video7", .sensor_entity = 1,
+    };
+    cc_still_configuration config = {.buffer_count = 123};
+    cc_capture *capture = NULL;
+    const cc_still_options wrong = {.profile = CC_VC4_PROFILE_IMX477};
+    ERROR(cc_still_open_io(&info, &wrong, &io, &capture, &config), ENOTSUP);
+    CHECK(!capture && config.buffer_count == 123);
+    finished(&f);
+
+    f.wrong_driver = true;
+    ERROR(cc_still_open_io(&info, NULL, &io, &capture, &config), ENODEV);
+    CHECK(!capture && config.buffer_count == 123);
+    finished(&f);
+    f.wrong_driver = false;
+
+    f.fail_req = VIDIOC_REQBUFS;
+    f.fail_node = 1;
+    f.fail_nth = 1;
+    f.fail_errno = EIO;
+    ERROR(cc_still_open_io(&info, NULL, &io, &capture, &config), EIO);
+    CHECK(!capture && config.buffer_count == 123);
+    finished(&f);
+    f.fail_req = 0;
+
+    const cc_still_options options = {.fourcc = V4L2_PIX_FMT_RGB24, .width = 96, .height = 72,
+        .profile = CC_VC4_PROFILE_IMX219_NOIR};
+    int ret = cc_still_open_io(&info, pisp ? &options : NULL, &io, &capture, &config);
+    if (ret < 0)
+        fprintf(stderr, "Still setup (%s): %s\n", pisp ? "PiSP" : "VC4", strerror(-ret));
+    OK(ret);
+    CHECK(config.stream == (pisp ? CC_CAPTURE_OUTPUT1 : CC_CAPTURE_OUTPUT0));
+    CHECK(config.format.fourcc == (pisp ? V4L2_PIX_FMT_RGB24 : V4L2_PIX_FMT_YUV420));
+    CHECK(config.format.width == (pisp ? 96U : 128U) && config.format.height == (pisp ? 72U : 96U));
+    CHECK(config.orientation == CC_ORIENTATION_ROTATE_0 && config.buffer_count == 2);
+    cc_photo_capabilities caps;
+    OK(cc_capture_get_photo_capabilities(capture, &caps));
+    CHECK(caps.profile == (pisp ? CC_VC4_PROFILE_IMX219_NOIR : CC_VC4_PROFILE_OV5647));
+
+    cc_request *request, *out = NULL;
+    OK(cc_request_create(1, &request));
+    for (unsigned i = 0; i < 2; ++i) {
+        OK(cc_capture_queue(capture, request));
+        OK(cc_capture_dequeue(capture, &out, 0));
+        CHECK(out == request);
+        const cc_capture_result *result = cc_request_get_result(out);
+        CHECK(result->status == CC_REQUEST_COMPLETE && result->ipa.flags & CC_IPA_METADATA_PHOTO);
+        const cc_frame *frame = &result->output[pisp ? 1 : 0];
+        CHECK(frame->num_planes == config.format.num_planes && frame->planes[0].data &&
+              frame->planes[0].length == config.format.planes[0].size);
+        OK(cc_capture_release(capture, request));
+        OK(cc_capture_stop(capture));
+    }
+    cc_capture_close(capture);
+    OK(cc_request_destroy(request));
+    finished(&f);
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "still")) {
+        test_still_pi(false);
+        test_still_pi(true);
+        puts("Automatic VC4/PiSP still setup, tuning, capture, restart and cleanup passed");
+        return 0;
+    }
     if ((argc==2 || argc==3) && !strcmp(argv[1],"native-photo")) {
         if (argc==3) { proxy_worker=argv[2]; int ret=proxy_available(); if (ret==77) return ret; OK(ret); }
         test_native_photo(); test_native_photo_failures(); return 0;
