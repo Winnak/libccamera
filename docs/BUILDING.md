@@ -244,7 +244,7 @@ target_link_libraries(your_library PRIVATE ccamera::ccamera)
 Or install with `cmake --install build --prefix /your/prefix` and consume it:
 
 ```cmake
-find_package(ccamera 0.1 CONFIG REQUIRED)
+find_package(ccamera 1.0 CONFIG REQUIRED)
 target_link_libraries(your_library PRIVATE ccamera::ccamera)
 ```
 

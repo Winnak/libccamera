@@ -122,9 +122,8 @@ test scene for shared images and check their metadata for personal details.
 
 ## C API compatibility
 
-Public headers and type layouts may change during the 0.x series. Rebuild
-applications against matching headers when updating the library. The installed
-consumer test checks the current build's headers and library together.
+Rebuild applications against matching headers when updating the library. The
+installed consumer test checks the current build's headers and library together.
 
 For a stable C API, designate the supported headers, types and behaviours.
 Document a versioning and deprecation policy, then build and run existing

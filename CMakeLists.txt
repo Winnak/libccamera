@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(libccamera VERSION 0.1.0 LANGUAGES C)
+project(libccamera VERSION 1.0.0 LANGUAGES C)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "libccamera currently requires Linux media and V4L2 APIs")

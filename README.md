@@ -104,13 +104,13 @@ to supplied devices. Select a NoIR, wide or supported HQ lens variant with
 `ccamera-still` provides the VC4 diagnostics described in the OV5647 guide.
 
 The public API starts at [ccamera/ccamera.h](include/ccamera/ccamera.h), with
-complete examples in [examples/](examples/). The public C API may change during
-the 0.x series. See [C API compatibility](CONTRIBUTING.md#c-api-compatibility).
+complete examples in [examples/](examples/). See
+[C API compatibility](CONTRIBUTING.md#c-api-compatibility) when updating the library.
 
 Use CMake to link against the installed library.
 
 ```cmake
-find_package(ccamera 0.1 CONFIG REQUIRED)
+find_package(ccamera 1.0 CONFIG REQUIRED)
 target_link_libraries(your_library PRIVATE ccamera::ccamera)
 ```
 

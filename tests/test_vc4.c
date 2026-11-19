@@ -3506,7 +3506,7 @@ static void test_native_photo(void)
             }
             CHECK(reused_history == tdn);
             if (hdr) {
-                double wanted = options->hdr_ratio ? options->hdr_ratio : 4;
+                double wanted = options->hdr_ratio != 0.0 ? options->hdr_ratio : 4.0;
                 CHECK(s->short_exposure_ns < s->long_exposure_ns && s->hdr_ratio >= wanted && s->hdr_ratio < wanted + 1);
                 check_hdr_output(&f.native_configs[0], &f.native_configs[f.native_jobs - 1]);
             } else CHECK(s->hdr_ratio == 0 && s->long_exposure_ns == s->short_exposure_ns);
