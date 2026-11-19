@@ -223,8 +223,11 @@ int main(int argc, char **argv)
     cc_af *af=NULL;
     if (cc_af_create(&af_tuning,&af)) return 1;
     cc_af_destroy(af);
-    if (strcmp(cc_version(), "0.1.0"))
+    if (strcmp(cc_version(), CCAMERA_EXPECTED_VERSION)) {
+        fprintf(stderr, "Library version %s differs from package version %s\n",
+                cc_version(), CCAMERA_EXPECTED_VERSION);
         return 1;
+    }
     cc_ipa_reference_tuning tuning={.flags=CC_IPA_REFERENCE_AWB,.target_luminance=0.18,
         .exposure_speed=0.5,.white_balance_speed=0.5,.min_colour_gain=0.5,.max_colour_gain=4};
     cc_ipa *ipa=NULL;

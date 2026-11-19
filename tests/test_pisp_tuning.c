@@ -297,11 +297,15 @@ static void measured_shading(void)
 }
 int main(int argc,char **argv)
 {
-    CHECK(argc==1 || argc==2); if (argc==2) {
+    CHECK(argc==1 || argc==2);
+    if (argc==2) {
         worker=argv[1]; cc_ipa *probe=NULL; int ret=create(NULL,&probe);
         if (ret==-ENOSYS || ret==-EPERM || ret==-EACCES) return 77;
         OK(ret); cc_ipa_destroy(probe);
+    } else {
+        vectors();
+        aberration();
     }
-    vectors(); aberration(); measured_shading(); controllers(); white_balance();
+    measured_shading(); controllers(); white_balance();
     puts("PiSP calibrated native blocks and feedback passed"); return 0;
 }

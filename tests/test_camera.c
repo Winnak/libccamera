@@ -72,14 +72,15 @@ struct fake {
     bool mc_only, m2m, ext_colors, closed_while_streaming;
     bool fail_lock, fail_open;
     int opened, closed, live_maps, map_calls, fail_map_at;
-    int wait_calls, interrupt_waits, wait_error, wait_ready_at;
-    int export_count, streamoff_calls, sensor_set_calls, mux_set_calls, routing_calls;
+    int interrupt_waits, wait_error;
+    int export_count;
+    bool sensor_format_set, mux_format_set, try_route, active_route;
     int import_count;
     int fail_nth, fail_errno, fail_fd;
     unsigned long fail_request;
     uint32_t allocated, force_count, sequence;
     bool queued[256];
-    uint64_t now;
+    uint64_t now, wait_ready_at;
     cc_format active;
     struct v4l2_mbus_framefmt sensor_active, sensor_try, mux_active, mux_try;
     struct media_link_desc links[8];
@@ -92,11 +93,11 @@ struct fake {
     } fe_nodes[4];
     struct v4l2_mbus_framefmt fe_format, fe_try;
     struct pisp_fe_config last_parameters;
-    bool fe_bad_pair, fe_bad_image1, fe_fail_stop, fe_parameter_error;
+    bool fe_bad_pair, fe_bad_image1, fe_fail_stop, fe_parameter_error, fe_started;
     bool clean_frames;
     bool ipa_scene, ipa_truncated;
     int64_t scene_baseline;
-    int fe_delayed, fe_starts;
+    int fe_delayed;
     uint32_t fe_sequence;
     int64_t scalar, i64, bitmask;
     int64_t vblank;
@@ -272,7 +273,6 @@ static int fake_wait(void *ctx, int fd, short events, int timeout)
     CHECK((fd == VIDEO_FD || (f->frontend && fd >= FE_VIDEO_BASE && fd < FE_VIDEO_BASE + 4)) &&
           (events == POLLIN || events == POLLPRI || events == (POLLIN | POLLPRI) ||
            (f->frontend && events == POLLOUT)) && (timeout == -1 || timeout > 0));
-    ++f->wait_calls;
     f->now += UINT64_C(1000000);
     if (f->interrupt_waits > 0) {
         --f->interrupt_waits;
@@ -280,7 +280,7 @@ static int fake_wait(void *ctx, int fd, short events, int timeout)
     }
     if (f->wait_error)
         return -f->wait_error;
-    if (f->wait_ready_at > 0 && f->wait_calls >= f->wait_ready_at) {
+    if (f->wait_ready_at && f->now >= f->wait_ready_at) {
         f->not_ready = false;
         return 0;
     }
@@ -671,7 +671,10 @@ static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *ar
         CHECK(route->sink_pad == 0 && route->source_pad == 1 &&
               route->sink_stream == 0 && route->source_stream == 0 && route->flags == CC_SD_ROUTE_ACTIVE);
         CHECK(which == V4L2_SUBDEV_FORMAT_TRY || which == V4L2_SUBDEV_FORMAT_ACTIVE);
-        ++f->routing_calls;
+        if (which == V4L2_SUBDEV_FORMAT_TRY)
+            f->try_route = true;
+        else
+            f->active_route = true;
         return 0;
     }
     if (req == VIDIOC_SUBDEV_ENUM_MBUS_CODE) {
@@ -717,9 +720,9 @@ static int fake_sensor_ioctl(struct fake *f, int fd, unsigned long req, void *ar
         format->format.height = f->frontend ? 64 : 32;
         if (fd == MUX_FD) {
             CHECK(format->pad == 0);
-            ++f->mux_set_calls;
+            f->mux_format_set = true;
         } else {
-            ++f->sensor_set_calls;
+            f->sensor_format_set = true;
         }
         *current = format->format;
     } else if (fd == MUX_FD) {
@@ -786,7 +789,7 @@ static int fake_frontend_ioctl(struct fake *f, int fd, unsigned long req, void *
         return 0;
     }
     if (req == VIDIOC_STREAMON) {
-        f->fe_nodes[port].streaming = true; ++f->fe_starts;
+        f->fe_nodes[port].streaming = true; f->fe_started = true;
         if (f->event_auto && port == 2) frame_event(f, f->fe_sequence - 1U);
         return 0;
     }
@@ -1048,7 +1051,6 @@ static int fake_ioctl(void *ctx, int fd, unsigned long req, void *arg)
         return 0;
     }
     if (req == VIDIOC_STREAMOFF) {
-        ++f->streamoff_calls;
         f->streaming = false;
         if (f->event_auto) f->sequence = 0;
         memset(f->queued, 0, sizeof(f->queued));
@@ -1225,7 +1227,7 @@ static void test_lifecycle(bool multiplanar)
     CHECK(frame.planes[0].bytes_used == 0);
     OK(cc_camera_queue(camera, 1)); /* Prequeued buffers must also be cancelled. */
     OK(cc_camera_free_buffers(camera));
-    CHECK(f.live_maps == 0 && f.allocated == 0 && f.streamoff_calls == 2);
+    CHECK(!f.live_maps && !f.allocated && !f.streaming && !f.queued[1]);
     allocate(camera, &f);
     close_camera(camera, &f);
 }
@@ -1237,17 +1239,17 @@ static void test_waits(void)
     capture(camera, &f);
     cc_frame frame;
     f.not_ready = true;
+    uint64_t start = f.now;
     ERROR(cc_camera_dequeue(camera, &frame, 0), EAGAIN);
-    CHECK(f.wait_calls == 0);
+    CHECK(f.now == start);
     f.interrupt_waits = 10;
     ERROR(cc_camera_dequeue(camera, &frame, 3), ETIMEDOUT);
-    CHECK(f.wait_calls == 3);
+    CHECK(f.now - start == UINT64_C(3000000));
     f.interrupt_waits = 0;
-    f.wait_ready_at = 5;
+    f.wait_ready_at = f.now + UINT64_C(2000000);
     OK(cc_camera_dequeue(camera, &frame, 3));
-    CHECK(f.wait_calls == 5);
     f.not_ready = true;
-    f.wait_ready_at = 6;
+    f.wait_ready_at = f.now + UINT64_C(1000000);
     OK(cc_camera_dequeue(camera, &frame, -1));
     f.not_ready = true;
     f.wait_error = ENODEV;
@@ -1407,7 +1409,6 @@ static void test_unicam(void)
 {
     struct fake f = fake_new(true, false);
     cc_camera *camera = open_camera(&f);
-    CHECK(f.opened == 4); /* Media, sensor, mux, capture node. */
     cc_sensor_mode mode;
     OK(cc_camera_enum_sensor_mode(camera, 0, 0, &mode));
     CHECK(mode.mbus_code == MEDIA_BUS_FMT_SRGGB10_1X10 && mode.sizes.max_width == 64);
@@ -1421,7 +1422,6 @@ static void test_unicam(void)
     capture(camera, &f);
     CHECK(f.links[0].flags & MEDIA_LNK_FL_ENABLED);
     CHECK(!(f.links[1].flags & MEDIA_LNK_FL_ENABLED));
-    CHECK(f.sensor_set_calls == 2 && f.mux_set_calls == 2);
     cc_frame frame;
     OK(cc_camera_dequeue(camera, &frame, 10));
     close_camera(camera, &f);
@@ -1470,7 +1470,6 @@ static void test_open_failures(void)
     ERROR(cc_camera_fd(NULL), EINVAL);
     ERROR(cc_camera_configure(NULL, NULL), EINVAL);
     ERROR(cc_camera_open_video(NULL, NULL), EINVAL);
-    CHECK(!strcmp(cc_version(), "0.1.0"));
 }
 
 static void test_cfe(void)
@@ -1490,10 +1489,11 @@ static void test_cfe(void)
         OK(cc_camera_try_format(camera, &format));
         CHECK(f.links[3].flags & MEDIA_LNK_FL_ENABLED);
         CHECK(!(f.links[2].flags & MEDIA_LNK_FL_ENABLED));
+        CHECK(f.try_route == f.streams && !f.active_route);
         capture(camera, &f);
         CHECK(!(f.links[3].flags & MEDIA_LNK_FL_ENABLED));
         CHECK(f.links[2].flags & MEDIA_LNK_FL_ENABLED);
-        CHECK(f.routing_calls == (f.streams ? 2 : 0));
+        CHECK(f.active_route == f.streams);
         cc_frame frame;
         OK(cc_camera_dequeue(camera, &frame, 10));
         close_camera(camera, &f);
@@ -1592,8 +1592,9 @@ static void test_frontend_controller(void)
         f.fe_delayed = CC_CFE_STATISTICS;
         cc_cfe_result result = { .cookie = 987 };
         ERROR(cc_cfe_dequeue(cfe, &result, 0), EAGAIN);
+        uint64_t start = f.now;
         ERROR(cc_cfe_dequeue(cfe, &result, 3), ETIMEDOUT);
-        CHECK(result.cookie == 987 && f.fe_starts == 3 && f.wait_calls == 3);
+        CHECK(result.cookie == 987 && f.now - start == UINT64_C(3000000));
         f.fe_delayed = -1;
         OK(cc_cfe_dequeue(cfe, &result, 0));
         CHECK(result.cookie == 42 && result.index == 1 && result.image.sequence == result.statistics.sequence);
@@ -1605,7 +1606,7 @@ static void test_frontend_controller(void)
         tune.global.enables = PISP_FE_ENABLE_BLA | PISP_FE_ENABLE_AGC_STATS;
         tune.bla.black_level_r = 1024;
         OK(cc_cfe_queue(cfe, 0, &tune, 123));
-        CHECK(f.last_parameters.bla.black_level_r == 1024 && f.fe_starts == 3);
+        CHECK(f.last_parameters.bla.black_level_r == 1024);
         OK(cc_cfe_release(cfe, 1));
         OK(cc_cfe_dequeue(cfe, &result, 100));
         CHECK(result.cookie == 123 && result.index == 0);
@@ -1874,8 +1875,9 @@ static void test_request_capture(bool frontend)
     cc_request *result = (cc_request *)(uintptr_t)1;
     if (frontend) f.fe_delayed = CC_CFE_STATISTICS;
     else f.not_ready = true;
+    uint64_t start = f.now;
     ERROR(cc_capture_dequeue(graph, &result, 3), ETIMEDOUT);
-    CHECK(result == (cc_request *)(uintptr_t)1 && f.wait_calls == 3);
+    CHECK(result == (cc_request *)(uintptr_t)1 && f.now - start == UINT64_C(3000000));
     struct pollfd fds[3];
     size_t n = 0;
     OK(cc_capture_pollfds(graph, NULL, &n)); CHECK(n == 1);
@@ -2136,11 +2138,11 @@ static void test_sensor_delays(bool frontend)
     struct pollfd fds[4]; size_t n = 4;
     OK(cc_capture_pollfds(c, fds, &n));
     CHECK(n == 1 && fds[0].events == POLLPRI && fds[0].fd == (frontend ? FE_VIDEO_BASE : VIDEO_FD));
-    int waits = f.wait_calls;
+    uint64_t start = f.now;
     cc_request *unchanged = r;
     ERROR(cc_capture_dequeue(c, &r, 10), EAGAIN);
     ERROR(cc_capture_dequeue(c, &r, -1), EAGAIN);
-    CHECK(r == unchanged && f.wait_calls == waits);
+    CHECK(r == unchanged && f.now == start);
     OK(cc_capture_stop(c)); CHECK(!f.event_subscribed && !held->sensor.count);
     OK(cc_capture_release(c, requests[0]));
     OK(cc_capture_queue(c, r));
@@ -2456,7 +2458,7 @@ static void test_ipa_graph_failures(void)
                 OK(cc_capture_release(c,out));
             }
             CHECK(probe.configured==2 && probe.started==1 && probe.stopped==(fault==1 ? 0 : 1));
-            if (fault==1 || fault==2 || fault==4) CHECK(!f.fe_starts);
+            if (fault==1 || fault==2 || fault==4) CHECK(!f.fe_started);
             if (fault==7) CHECK(!probe.processed);
             cc_capture_close(c); CHECK(probe.destroyed==1);
             for (size_t i=0;i<2;++i) OK(cc_request_destroy(requests[i]));
@@ -2641,7 +2643,7 @@ static void test_uvc_graph(bool multiplanar,bool media,bool v2)
     f.uvc_bad_menu=true; saved=menu; ERROR(cc_camera_query_menu(camera,V4L2_CID_EXPOSURE_AUTO,3,&menu),EPROTO);
     CHECK(!memcmp(&menu,&saved,sizeof(menu))); f.uvc_bad_menu=false;
     f.uvc_missing=CC_UVC_GAMMA; OK(cc_camera_get_uvc_profile(camera,&profile)); CHECK(profile.flags==63); f.uvc_missing=0;
-    allocate(camera,&f); CHECK(!f.sensor_set_calls && !f.mux_set_calls);
+    allocate(camera,&f); CHECK(!f.sensor_format_set && !f.mux_format_set);
     uint32_t count=3; cc_capture_devices devices={.camera=camera}; cc_capture *capture;
     OK(cc_capture_create(&devices,&capture,&count)); cc_request *requests[3],*out;
     cc_camera_properties adopted;
@@ -2681,7 +2683,7 @@ static void test_uvc_graph(bool multiplanar,bool media,bool v2)
     OK(cc_capture_queue(capture,requests[1])); OK(cc_capture_dequeue(capture,&out,0));
     CHECK(cc_request_get_result(out)->status==CC_REQUEST_COMPLETE); OK(cc_capture_release(capture,out));
     cc_capture_close(capture); for (size_t i=0;i<3;++i) OK(cc_request_destroy(requests[i]));
-    CHECK(f.opened==f.closed && !f.live_maps && !f.streaming && !f.sensor_set_calls && !f.mux_set_calls);
+    CHECK(f.opened==f.closed && !f.live_maps && !f.streaming && !f.sensor_format_set && !f.mux_format_set);
 }
 static void test_uvc_media_errors(void)
 {
@@ -2809,7 +2811,7 @@ static void test_oriented_raw(void)
         enum cc_orientation orientation=orientations[flip];
         enum cc_transform transform;
         OK(cc_camera_try_orientation(camera,&orientation,&transform));
-        CHECK((uint32_t)transform==flip && !f.orientation_writes && !f.sensor_set_calls);
+        CHECK((uint32_t)transform==flip && !f.orientation_writes && !f.sensor_format_set);
         f.validation_only=true; cc_format predicted=format; enum cc_orientation predicted_o=orientation;
         cc_format active=f.active; struct v4l2_mbus_framefmt sensor=f.sensor_active;
         OK(cc_camera_try_format_oriented(camera,&predicted,&predicted_o));

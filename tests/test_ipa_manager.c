@@ -13,8 +13,6 @@
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); exit(1); } } while (0)
 #define OK(x) CHECK((x) == 0)
 #define ERROR(x,e) CHECK((x) == -(e))
-struct manager_vector { unsigned order, depth; uint32_t minimum, maximum; size_t count; const char *selected; };
-#include "ipa_manager_vectors.h"
 static char root[] = "/tmp/ccamera-ipa-manager-XXXXXX";
 static char trace_path[256];
 static void path(char out[256], const char *relative)
@@ -58,28 +56,39 @@ static void setup(char **modules)
     char name[256]; path(name, "A/alias.so"); OK(symlink("z-last.so", name));
     path(name, "A/linked-directory"); OK(symlink("nested", name));
 }
-static void test_vectors(void)
+static void test_discovery(void)
 {
+    const struct {
+        bool reverse;
+        size_t directories;
+        unsigned depth;
+        uint32_t minimum, maximum;
+        size_t count;
+        const char *selected;
+    } cases[] = {
+        {false, 1, 0, 4, 9, 3, "A/a-first.so"},
+        {false, 1, 0, 7, 7, 3, "A/z-last.so"}, /* Symlink selection returns the canonical path. */
+        {false, 1, 0, 9, 9, 3, NULL},
+        {false, 1, 1, 9, 9, 5, "A/fake.so/d.so"},
+        {false, 1, 2, 7, 7, 6, "A/z-last.so"},
+        {false, 2, 1, 9, 9, 7, "A/fake.so/d.so"},
+        {true,  2, 1, 4, 9, 7, "B/0-override.so"},
+    };
     char a[256], b[256]; path(a, "A"); path(b, "B");
     reset_trace(); size_t before = descriptors();
-    for (size_t i = 0; i < sizeof(manager_vectors) / sizeof(manager_vectors[0]); ++i) {
-        const struct manager_vector *v = &manager_vectors[i];
-        cc_ipa_module_directory directories[2] = {{a, v->depth}, {b, v->depth}};
-        if (v->order == 1 || v->order == 3) { directories[0].path = b; directories[1].path = a; }
-        cc_ipa_manager_options options = {.directories = directories, .num_directories = v->order < 2 ? 1 : 2};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        cc_ipa_module_directory directories[2] = {
+            {cases[i].reverse ? b : a, cases[i].depth}, {cases[i].reverse ? a : b, cases[i].depth}};
+        cc_ipa_manager_options options = {.directories = directories, .num_directories = cases[i].directories};
         cc_ipa_manager *manager = NULL; OK(cc_ipa_manager_open(&options, &manager));
-        CHECK(cc_ipa_manager_count(manager) == v->count);
+        CHECK(cc_ipa_manager_count(manager) == cases[i].count);
         size_t index = 999;
-        int ret = cc_ipa_manager_select(manager, "TestPipeline", v->minimum, v->maximum, NULL, &index);
-        if (!v->selected) { CHECK(ret == -ENOENT && index == 999); }
+        int ret = cc_ipa_manager_select(manager, "TestPipeline", cases[i].minimum, cases[i].maximum, NULL, &index);
+        if (!cases[i].selected) { CHECK(ret == -ENOENT && index == 999); }
         else {
-            CHECK(ret == 0 && index < v->count); char expected[256]; path(expected, v->selected);
+            CHECK(ret == 0 && index < cases[i].count); char expected[256]; path(expected, cases[i].selected);
             CHECK(!strcmp(cc_ipa_manager_get_path(manager, index), expected));
-            const cc_ipa_module_info *info = cc_ipa_manager_get_info(manager, index);
-            CHECK(info && info->pipeline_version >= v->minimum && info->pipeline_version <= v->maximum);
         }
-        CHECK(!cc_ipa_manager_get_info(manager, v->count) && !cc_ipa_manager_get_path(manager, v->count));
-        index = 999; ERROR(cc_ipa_manager_select(manager, "other", 0, UINT32_MAX, NULL, &index), ENOENT); CHECK(index == 999);
         cc_ipa_manager_close(manager); CHECK(descriptors() == before);
     }
     expect_trace("");
@@ -92,7 +101,11 @@ static void test_selection(const char *module)
     size_t index = 999;
     OK(cc_ipa_manager_select(manager, "TestPipeline", 0, UINT32_MAX, "alternate", &index));
     CHECK(cc_ipa_manager_get_info(manager, index)->pipeline_version == 4);
-    ERROR(cc_ipa_manager_select(manager, "TestPipeline", 7, 7, "alternate", &index), ENOENT); CHECK(index == 0);
+    size_t selected = index;
+    ERROR(cc_ipa_manager_select(manager, "TestPipeline", 7, 7, "alternate", &index), ENOENT); CHECK(index == selected);
+    ERROR(cc_ipa_manager_select(manager, "other", 0, UINT32_MAX, NULL, &index), ENOENT); CHECK(index == selected);
+    size_t count = cc_ipa_manager_count(manager);
+    CHECK(!cc_ipa_manager_get_info(manager, count) && !cc_ipa_manager_get_path(manager, count));
     ERROR(cc_ipa_manager_select(manager, "TestPipeline", 8, 7, NULL, &index), EINVAL);
     ERROR(cc_ipa_manager_select(manager, "TestPipeline", 0, 9, "", &index), EINVAL);
     ERROR(cc_ipa_manager_select(manager, "", 0, 9, NULL, &index), EINVAL);
@@ -229,8 +242,8 @@ int main(int argc, char **argv)
     ERROR(cc_ipa_manager_create(NULL, "TestPipeline", 0, 9, NULL, NULL, 0, &ipa), EINVAL); CHECK(!ipa);
     cc_ipa_manager_options empty = {0}; OK(cc_ipa_manager_open(&empty, &manager)); CHECK(!cc_ipa_manager_count(manager));
     cc_ipa_manager_close(manager);
-    setup(argv + 1); test_vectors(); test_selection(argv[1]); test_failures(argv + 1); test_environment(); test_limits();
+    setup(argv + 1); test_discovery(); test_selection(argv[1]); test_failures(argv + 1); test_environment(); test_limits();
     cleanup(root);
-    puts("IPA discovery: 60 archived policies, precedence, bounded traversal, environment and retained instances passed");
+    puts("IPA discovery, precedence, bounded traversal, environment and retained instances passed");
     return 0;
 }

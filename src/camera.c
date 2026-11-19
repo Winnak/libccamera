@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-const char *cc_version(void) { return "0.1.0"; }
+const char *cc_version(void) { return CCAMERA_VERSION; }
 
 int cc_camera_get_sensor(cc_camera *camera, const cc_sensor_model **out)
 {

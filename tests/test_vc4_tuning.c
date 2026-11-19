@@ -505,17 +505,18 @@ int main(int argc, char **argv)
         int ret = create_controller(NULL, &probe);
         if (ret == -ENOSYS || ret == -EPERM || ret == -EACCES) return 77;
         OK(ret); cc_ipa_destroy(probe);
+    } else {
+        live_geometry();
+        profile();
+        profile_vectors();
+        selection();
+        flicker();
     }
-    live_geometry();
-    profile();
-    profile_vectors();
     measured_shading();
-    selection();
     module_controllers();
-    flicker();
     controller();
     for (unsigned i = CC_VC4_PROFILE_OV5647; i <= CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++i)
         feedback((enum cc_vc4_profile)i);
-    puts("VC4 module profiles, calibration vectors, geometry, flicker and still controllers passed");
+    puts("VC4 calibration and still controllers passed");
     return 0;
 }

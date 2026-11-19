@@ -87,11 +87,11 @@ PiSP back-end test checks native parameter delivery, one/two/three-plane image
 layouts, both output streams, widened chroma-stride allocation repair, source
 fd/attachment lifetime, partial completions and per-port failure cancellation.
 Its C tiler is checked for complete, disjoint image
-coverage, filter context, DMA alignment and capacity bounds across more than
-10,000 frame sizes, plus YUV chroma-plane bounds, byte order, independent
-601/709 conversion and full/limited clipping. Crop/resize/flip tests use 32
-upstream-generated native tile fixtures and 2,000 deterministic geometry cases,
-checking output coverage, scaler phases and DMA bounds. Driver tests check
+coverage, filter context, DMA alignment and capacity bounds at representative
+frame sizes and around tile boundaries. Format tests check YUV chroma-plane
+bounds, byte order, independent 601/709 conversion and full/limited clipping.
+Crop/resize/flip tests exercise independent crops and 2,000 deterministic
+geometry cases, checking output coverage, scaler phases and DMA bounds. Driver tests check
 resized jobs and colour metadata when V4L2 nodes force defaults. Processing tests
 check native denoise, debin, tone mapping, saturation, false-colour and sharpen
 blocks, CAC grid coverage and tile phases, invalid register values/kernel sums,
@@ -173,18 +173,12 @@ failed configuration and cancellation. A pure ELF fuzz target exercises raw and
 structured malformed inputs without loading code. The system dynamic loader
 is part of libc on current glibc/musl systems; CMake links system libdl when older
 platforms require it and propagates it to static CMake/pkg-config consumers.
-IPA discovery adds 60 fixtures from compiled, unmodified archived
-`parseDir`/`addDir`/`module`/`match` methods, with text-only metadata stubs. Native
-tests reproduce their filesystem trees using real C modules and cover priority,
+IPA discovery tests build filesystem trees with real C modules and cover priority,
 recursion, aliases, version/name selection, skipped invalid modules, no fallback
 after selected-module failure, environment/privilege rules, snapshot behavior,
 descriptor zero, limits and complete descriptor cleanup. Selected modules also
 run through VC4/CFE/PiSP graph adoption and teardown. A separate pure path-policy
-fuzzer performs no filesystem access. The reference fixtures can be regenerated:
-
-```sh
-python3 tools/generate_ipa_manager_vectors.py /path/to/libcamera-reference.tar.xz
-```
+fuzzer exercises validation and ordering without filesystem access.
 
 Runtime-location tests discover a real module two levels under the active build
 image's `ipa/` directory, load it and retain its callbacks after manager closure.

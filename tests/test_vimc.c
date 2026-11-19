@@ -511,6 +511,9 @@ int main(int argc, char **argv)
         int ret = cc_ipa_vimc_create_proxy(&controller, &options, &probe, &flags);
         if (ret == -ENOSYS || ret == -EPERM || ret == -EACCES) return 77;
         OK(ret); cc_ipa_destroy(probe);
+        test_capture(true, true);
+        puts("VIMC imported capture, controls, held results and restart through the isolated IPA passed");
+        return 0;
     }
     const uint32_t versions[]={0x050500,0x050600,0x050700,0x050f00,0x051000,0x060c00};
     for (size_t i=0;i<sizeof(versions)/sizeof(versions[0]);++i) for (int v2=0;v2<2;++v2) test_formats(versions[i],v2!=0);

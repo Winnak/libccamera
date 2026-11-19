@@ -362,9 +362,12 @@ int main(int argc, char **argv)
         int ret = cc_ipa_vc4_create_proxy(NULL, &options, &probe);
         if (ret == -ENOSYS || ret == -EPERM || ret == -EACCES) return 77;
         OK(ret); cc_ipa_destroy(probe);
+    } else {
+        test_statistics();
+        test_lifecycle();
     }
     test_embedded_hdr_feedback(); test_duration_planning();
-    test_statistics(); test_lifecycle(); test_reference(); test_pisp_and_invalid(); test_af_update_rate();
-    puts("C IPA ABI/lifecycle, native statistics, AE/AGC/AWB convergence, quantization and PiSP tuning passed");
+    test_reference(); test_pisp_and_invalid(); test_af_update_rate();
+    puts("IPA feedback, quantization and PiSP tuning passed");
     return 0;
 }

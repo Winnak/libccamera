@@ -18,7 +18,6 @@ endif()
 
 # Instrument the library itself, while leaving the installed ccamera target and
 # its consumers free of sanitizer/runtime dependencies.
-list(TRANSFORM CCAMERA_SOURCES PREPEND "${libccamera_SOURCE_DIR}/")
 add_library(ccamera-fuzz-support STATIC ${CCAMERA_SOURCES})
 ccamera_compile_settings(ccamera-fuzz-support)
 target_include_directories(ccamera-fuzz-support PUBLIC "${libccamera_SOURCE_DIR}/include")

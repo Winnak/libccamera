@@ -20,6 +20,7 @@ endif()
 run("${CMAKE_COMMAND}" -S "${CC_SOURCE_DIR}/tests/consumer" -B "${consumer}"
     -G "${CC_GENERATOR}"
     "-DCMAKE_PREFIX_PATH=${prefix}" "-DCMAKE_C_COMPILER=${CC_COMPILER}"
+    "-DCCAMERA_EXPECTED_VERSION=${CC_VERSION}"
     "-DCMAKE_C_FLAGS=${CC_C_FLAGS}" "-DCMAKE_EXE_LINKER_FLAGS=${CC_LINKER_FLAGS}"
     "-DCMAKE_BUILD_TYPE=${CC_CONFIG}" ${toolchain_args})
 run("${CMAKE_COMMAND}" --build "${consumer}" --config "${CC_CONFIG}")

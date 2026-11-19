@@ -40,11 +40,12 @@ static cc_ipa_wire *roundtrip(enum cc_ipa_wire_kind kind, const void *object)
 static void pointer_inputs(void)
 {
     cc_ipa_vc4_options vc4 = {.mains_hz = 60, .red_gain = 1.5, .blue_gain = 2,
-        .profile = CC_VC4_PROFILE_IMX708_WIDE_NOIR};
+        .autofocus = 1, .profile = CC_VC4_PROFILE_IMX708_WIDE_NOIR};
     cc_ipa_wire *vc4_wire = roundtrip(CC_IPA_WIRE_VC4, &vc4);
     const cc_ipa_vc4_options *vc4_copy = cc_ipa_wire_object(vc4_wire);
     CHECK(vc4_copy->profile == vc4.profile && vc4_copy->mains_hz == 60 &&
-          vc4_copy->red_gain == 1.5 && vc4_copy->blue_gain == 2 && !vc4_copy->lens_shading.enabled);
+          vc4_copy->red_gain == 1.5 && vc4_copy->blue_gain == 2 && vc4_copy->autofocus == 1 &&
+          !vc4_copy->lens_shading.enabled);
     cc_ipa_wire_destroy(vc4_wire);
     vc4.lens_shading.enabled = 1;
     for (unsigned ch = 0; ch < 3; ++ch)
@@ -180,9 +181,6 @@ int main(int argc, char **argv)
     metadata.hdr.histogram[127] = UINT32_MAX; metadata.hdr.counted = UINT64_MAX;
     cc_ipa_wire *wire = roundtrip(CC_IPA_WIRE_METADATA, &metadata); const cc_ipa_metadata *decoded = cc_ipa_wire_object(wire);
     CHECK(decoded->hdr.histogram[127] == UINT32_MAX && decoded->hdr.counted == UINT64_MAX); cc_ipa_wire_destroy(wire);
-    cc_ipa_vc4_options options = {.mains_hz = 50, .red_gain = 1.5, .blue_gain = 2.5, .autofocus=1};
-    wire = roundtrip(CC_IPA_WIRE_VC4, &options); const cc_ipa_vc4_options *vc4 = cc_ipa_wire_object(wire);
-    CHECK(vc4->mains_hz == 50 && vc4->red_gain == 1.5 && vc4->blue_gain == 2.5 && vc4->autofocus==1); cc_ipa_wire_destroy(wire);
     cc_photo_controls photo={.flags=CC_PHOTO_EV|CC_PHOTO_WB,.exposure_value=-1.5,
         .white_balance=CC_PHOTO_WB_MANUAL,.red_gain=1.5,.blue_gain=2};
     cc_ipa_request request={.photo=&photo}; wire=roundtrip(CC_IPA_WIRE_REQUEST,&request);

@@ -65,7 +65,9 @@ jobs:
           # Static consumers use their executable directory for IPA lookup.
           # Keep this installed consumer away from the build-tree marker.
           mkdir -p build/test-pkgconfig
+          ccamera_test_version=$(pkg-config --modversion ccamera)
           $CC -std=c17 -Wall -Wextra -Werror tests/consumer/main.c \
+            "-DCCAMERA_EXPECTED_VERSION=\"$ccamera_test_version\"" \
             $(pkg-config --cflags --libs --static ccamera) -o build/test-pkgconfig/consumer
           export LD_LIBRARY_PATH="$PWD/build/test-install/lib:$PWD/build/test-install/lib64"
           ./build/test-pkgconfig/consumer

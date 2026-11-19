@@ -245,8 +245,8 @@ callback data with large payloads, output ownership, independent instances,
 restart and descriptor zero. Factory/callback errors, invalid outputs, worker
 exit, hangs, first-match worker lookup and parent exit exercise cleanup/reaping.
 Constructor/destructor traces and the parent's mapped images confirm that the
-module executes only in the worker. The algorithm and calibrated VC4 test suites
-also run through proxy constructors with their ordinary expected results.
+module executes only in the worker. Controller tests also run through proxy
+constructors and check convergence, applied controls, and calibration.
 
 Current graph tests adopt direct/manager-selected proxies after module/manager
 closure and exercise raw CFE, VC4 and PiSP completion, AF/PDAF, embedded data,
@@ -258,9 +258,9 @@ IPA using the installed worker binary.
 `ipa-vimc-ipc` checks lifecycle traces/flags, multiple-plane maps, unaligned
 offsets, full tables, atomic rollback, duplicate IDs, unknown IDs, fd zero,
 asynchronous requests/notifications and repeated cleanup. Closed trace readers
-remain best-effort errors. `ipa-vimc-graphs` exercises existing VIMC MMAP/imported
-capture, controls, held results, restart, cancellation and injected driver errors
-with the actual isolated mock.
+remain best-effort errors. `ipa-vimc-graphs` exercises imported capture, controls,
+held results and restart with the isolated mock. The in-process graph suite also
+exercises MMAP capture, kernel compatibility, cancellation and driver errors.
 
 Regenerate the checked-in fixtures with Python 3, C++17 and the reference archive:
 

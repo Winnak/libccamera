@@ -289,7 +289,9 @@ static void validation(void)
 }
 int main(int argc, char **argv)
 {
-    CHECK(argc==1 || argc==2); if (argc==2) worker=argv[1]; validation();
+    CHECK(argc==1 || argc==2);
+    if (argc==2) worker=argv[1];
+    else validation();
     for (unsigned pipeline=0; pipeline<2; ++pipeline) {
         bool pisp=pipeline!=0;
         for (unsigned id=CC_VC4_PROFILE_OV5647; id<=CC_VC4_PROFILE_IMX708_WIDE_NOIR; ++id)
