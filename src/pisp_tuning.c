@@ -180,12 +180,13 @@ int cc_pisp_build_tuning_with_shading(cc_rpi_profile profile, const cc_sensor_ge
     unsigned li=0;
     while (li+2 < p->num_lsc && ct>p->lsc_ct[li+1]) ++li;
     mix=clamp((ct-p->lsc_ct[li])/(p->lsc_ct[li+1]-p->lsc_ct[li]),0,1);
+    /* The factory chroma tables contain correction gains. */
     double full[3][1024], adjusted[3][1024];
     for (unsigned i=0; i<1024; ++i) {
         double lum=1+p->luminance_strength*(p->lsc_y[i]-1);
-        full[0][i]=lum/(p->lsc_r[li*1024+i]*(1-mix)+p->lsc_r[(li+1)*1024+i]*mix);
+        full[0][i]=lum*(p->lsc_r[li*1024+i]*(1-mix)+p->lsc_r[(li+1)*1024+i]*mix);
         full[1][i]=lum;
-        full[2][i]=lum/(p->lsc_b[li*1024+i]*(1-mix)+p->lsc_b[(li+1)*1024+i]*mix);
+        full[2][i]=lum*(p->lsc_b[li*1024+i]*(1-mix)+p->lsc_b[(li+1)*1024+i]*mix);
     }
     for (unsigned ch=0; ch<3; ++ch)
         if (shading && shading->enabled)

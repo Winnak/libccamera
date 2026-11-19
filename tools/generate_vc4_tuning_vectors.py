@@ -55,7 +55,7 @@ for name in names:
         alsc = a["rpi.alsc"]
         full = []
         for channel in ("calibrations_Cr", None, "calibrations_Cb"):
-            full.append([(1 + alsc["luminance_strength"] * (alsc["luminance_lut"][i] - 1)) /
+            full.append([(1 + alsc["luminance_strength"] * (alsc["luminance_lut"][i] - 1)) *
                          (interpolate([(v["ct"], v["table"][i]) for v in alsc[channel]], ct) if channel else 1)
                          for i in range(192)])
         shading = []

@@ -51,7 +51,7 @@ for path in sorted(root.glob('data/*-pisp.json')):
                 min(65535,rnd(noise*cdn['deviation']))]
         alsc=a['rpi.alsc']; tables=[]
         for ch in ('calibrations_Cr',None,'calibrations_Cb'):
-            t=[(1+alsc['luminance_strength']*(alsc['luminance_lut'][i]-1))/
+            t=[(1+alsc['luminance_strength']*(alsc['luminance_lut'][i]-1))*
                (interp([(c['ct'],c['table'][i]) for c in alsc[ch]],ct) if ch else 1) for i in range(1024)]
             if crop:
                 t=[sample(t,(0.25+(x+0.5)/64)*32-0.5,(0.25+(y+0.5)/64)*32-0.5)

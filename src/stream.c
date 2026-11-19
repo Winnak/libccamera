@@ -231,6 +231,15 @@ static int format_from_v4l2(const cc_stream *stream, const struct v4l2_format *v
             f.quantization = p->quantization;
             f.xfer_func = p->xfer_func;
         }
+        /* bcm2835-isp stores only the colorspace. G_FMT omits the defaults
+         * that S_FMT and TRY_FMT derive from it. */
+        if (!f.ycbcr_enc && !f.quantization && !f.xfer_func &&
+            !strncmp((const char *)stream->device->caps.driver, "bcm2835-isp", sizeof(stream->device->caps.driver))) {
+            bool full_range = f.colorspace == V4L2_COLORSPACE_SRGB || f.colorspace == V4L2_COLORSPACE_RAW;
+            f.ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(f.colorspace);
+            f.quantization = V4L2_MAP_QUANTIZATION_DEFAULT(full_range, f.colorspace, f.ycbcr_enc);
+            f.xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(f.colorspace);
+        }
         f.num_planes = 1;
         f.planes[0] = (cc_plane_format) { p->bytesperline, p->sizeimage };
     }

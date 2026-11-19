@@ -219,12 +219,13 @@ int cc_vc4_build_tuning_with_shading(enum cc_vc4_profile profile, const cc_senso
     while (li + 2 < p->num_lsc && ct > p->lsc_ct[li + 1])
         ++li;
     f = clamp((ct - p->lsc_ct[li]) / (p->lsc_ct[li + 1] - p->lsc_ct[li]), 0, 1);
+    /* The factory chroma tables contain correction gains. */
     double full[3][192];
     for (unsigned i = 0; i < 192; ++i) {
         double lum = 1 + p->luminance_strength * (p->lsc_y[i] - 1);
-        full[0][i] = lum / (p->lsc_r[li * 192 + i] * (1 - f) + p->lsc_r[(li + 1) * 192 + i] * f);
+        full[0][i] = lum * (p->lsc_r[li * 192 + i] * (1 - f) + p->lsc_r[(li + 1) * 192 + i] * f);
         full[1][i] = lum;
-        full[2][i] = lum / (p->lsc_b[li * 192 + i] * (1 - f) + p->lsc_b[(li + 1) * 192 + i] * f);
+        full[2][i] = lum * (p->lsc_b[li * 192 + i] * (1 - f) + p->lsc_b[(li + 1) * 192 + i] * f);
     }
     for (unsigned ch = 0; ch < 3; ++ch)
         cc_rpi_resample_shading(shading && shading->enabled ? shading->gains[ch] : full[ch],

@@ -139,9 +139,9 @@ static void profile(void)
     CHECK(t.ccm.ccm.ccm[0][0].num == 2136 && t.ccm.ccm.ccm[0][0].den == 1000);
     CHECK(t.cdn.mode == CDN_MODE_HIGH_QUALITY && t.denoise.slope.num == 13600);
     OK(cc_vc4_ov5647_build_tuning(&g, 3000, 1, &flipped));
-    /* Independent full-field calibration-only reference values. */
-    CHECK(fabs(flipped.lens_shading[0][0] - 1.5080933156311813) < 1e-12);
-    CHECK(fabs(flipped.lens_shading[2][191] - 1.7570788655247644) < 1e-12);
+    /* Full-field gains from multiplying archive chroma and luminance tables. */
+    CHECK(fabs(flipped.lens_shading[0][0] - 1.728993563261075) < 1e-12);
+    CHECK(fabs(flipped.lens_shading[2][191] - 1.467671070986057) < 1e-12);
     g.hflip = g.vflip = 1;
     OK(cc_vc4_ov5647_build_tuning(&g, 5890, 1, &flipped));
     for (unsigned c = 0; c < 3; ++c)
@@ -391,6 +391,11 @@ static void controller(void)
     OK(cc_ipa_process(ipa, &frame, &m));
     CHECK((m.flags & CC_IPA_METADATA_PHOTO) && !(m.photo_status & CC_PHOTO_STATS_TRUSTED));
     frame.untrusted = 0;
+    /* Bright saturation with the firmware's AGC count sentinel. */
+    stats.agc_stats[0] = (struct bcm2835_isp_stats_region){.counted = 26334, .notcounted = UINT32_MAX,
+        .r_sum = 215857735, .g_sum = 216094609, .b_sum = 216485308};
+    OK(cc_ipa_process(ipa, &frame, &m));
+    CHECK((m.photo_status & CC_PHOTO_STATS_TRUSTED) && m.luminance >= 0 && m.luminance <= 1);
     stats.agc_stats[0].r_sum = UINT64_MAX;
     CHECK(cc_ipa_process(ipa, &frame, &m) == -EPROTO);
     stats.agc_stats[0] = stats.awb_stats[0];
@@ -429,6 +434,12 @@ static void feedback(enum cc_vc4_profile profile)
     cc_ipa_configuration c = configuration();
     const cc_vc4_profile_info *p = cc_vc4_get_profile_info(profile);
     OK(cc_sensor_lookup(p->sensor_model, &c.sensor));
+    bool bright_start = profile == CC_VC4_PROFILE_OV5647;
+    if (bright_start) {
+        /* Reopen in daylight with the shutter/gain left by a dim scene. */
+        c.initial_controls[0].value = 1000;
+        c.initial_controls[1].value = 48;
+    }
     if (strcmp(p->sensor_model, "ov5647")) {
         c.sensor_controls[1].minimum = 0;
         c.sensor_controls[1].maximum = !strcmp(p->sensor_model, "imx219") ? 232 : 960;
@@ -451,7 +462,8 @@ static void feedback(enum cc_vc4_profile profile)
         OK(cc_sensor_gain(c.sensor, (uint32_t)s.sensor_controls[2].value, &gain));
         uint64_t ns;
         OK(cc_sensor_exposure_time(c.sensor, &request.timing, exposure, &ns));
-        double level = (double)ns * gain / (iteration < 80 ? 40000000 : 160000000);
+        double scene = iteration < 80 ? (bright_start ? 2500000 : 40000000) : 160000000;
+        double level = (double)ns * gain / scene;
         if (level > 0.99)
             level = 0.99;
         uint64_t sum = (uint64_t)(level * 8192 * 1000);
@@ -478,7 +490,7 @@ static void feedback(enum cc_vc4_profile profile)
             stable = 0;
         stable = (m.flags & CC_IPA_AE_CONVERGED) ? stable + 1 : 0;
         CHECK(m.flags & CC_IPA_AWB_CONVERGED);
-        if (iteration == 79 || iteration == 159)
+        if ((bright_start && iteration == 24) || iteration == 79 || iteration == 159)
             CHECK(stable >= 3);
         request.timing.vblank = (uint32_t)s.sensor_controls[0].value;
     }

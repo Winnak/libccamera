@@ -205,7 +205,9 @@ static int enumerate_video(const struct cc_io *io, const char *path, cc_camera_i
     int ret=cc_query_capture(io,fd,&caps,&type);
     if (ret<0) { if (pending && transient(ret)) *pending=true; ret=0; goto done; }
     uint32_t capabilities=caps.capabilities&V4L2_CAP_DEVICE_CAPS ? caps.device_caps:caps.capabilities;
-    if (capabilities&V4L2_CAP_IO_MC || !strncmp((const char *)caps.driver,"unicam",sizeof(caps.driver)) ||
+    /* VC4 ISP output queues advertise capture without V4L2_CAP_IO_MC. */
+    if (capabilities&V4L2_CAP_IO_MC || !strncmp((const char *)caps.driver,"bcm2835-isp",sizeof(caps.driver)) ||
+        !strncmp((const char *)caps.driver,"unicam",sizeof(caps.driver)) ||
         !strncmp((const char *)caps.driver,"rp1-cfe",sizeof(caps.driver)) ||
         !strncmp((const char *)caps.driver,"vimc",sizeof(caps.driver))) goto done;
     for (size_t i=0; i<*count; ++i) if (!strcmp((*cameras)[i].video_path,path)) goto done;

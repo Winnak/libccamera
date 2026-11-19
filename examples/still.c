@@ -9,6 +9,7 @@
 #include <linux/dma-buf.h>
 #include <linux/media-bus-format.h>
 #include <linux/videodev2.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +56,137 @@ static int write_payload(FILE *out, const cc_frame *frame)
     }
     return 0;
 }
+
+static int raw10_luminance(const cc_format *format, const cc_frame *frame, double *luminance)
+{
+    const cc_plane *plane = &frame->planes[0];
+    size_t stride = format->planes[0].stride;
+    size_t row_bytes = (size_t)format->width / 4 * 5;
+    if (frame->num_planes != 1 || !plane->data || format->width < 4 || format->width % 4 ||
+        format->height < 2 || stride < row_bytes || plane->bytes_used > plane->length ||
+        plane->data_offset > plane->bytes_used ||
+        (uint64_t)(format->height - 1) * stride + row_bytes > plane->bytes_used - plane->data_offset)
+        return -EPROTO;
+    const unsigned char *data = (const unsigned char *)plane->data + plane->data_offset;
+    uint64_t sum = 0, samples = 0;
+    /* Sample complete RAW10 groups on both Bayer rows of a regular grid. */
+    for (uint32_t y = 0; y + 1 < format->height; y += 32) {
+        for (size_t x = 0; x < row_bytes; x += 40) {
+            for (unsigned row = 0; row < 2; ++row) {
+                const unsigned char *packed = data + (size_t)(y + row) * stride + x;
+                for (unsigned i = 0; i < 4; ++i)
+                    sum += ((uint32_t)packed[i] << 2) | (((uint32_t)packed[4] >> (2 * i)) & 3U);
+            }
+            samples += 8;
+        }
+    }
+    *luminance = (double)sum / (1023.0 * (double)samples);
+    return 0;
+}
+
+static int diagnostic_run(cc_camera *camera, const cc_format *format, uint32_t slots,
+                          const cc_control levels[2], uint32_t delay, uint32_t frames,
+                          uint64_t deadline, FILE *raw_file, struct row *rows, size_t *count,
+                          cc_sensor_trace *traces, size_t *trace_count)
+{
+    if (delay >= 16)
+        return -ERANGE;
+    int fd = cc_camera_fd(camera);
+    if (fd < 0)
+        return fd;
+    struct v4l2_event_subscription subscription = {.type = V4L2_EVENT_FRAME_SYNC};
+    if (ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &subscription) < 0)
+        return -errno;
+    int ret = 0;
+    for (uint32_t i = 0; !ret && i < slots; ++i)
+        ret = cc_camera_queue(camera, i);
+    if (!ret)
+        ret = cc_camera_start(camera);
+    uint32_t target = 16, event_sequence = 0;
+    bool seen_event = false;
+    while (!ret && *count < frames) {
+        uint64_t now = now_ns();
+        if (now >= deadline) {
+            ret = -ETIMEDOUT;
+            break;
+        }
+        int wait = (int)((deadline - now + 999999) / 1000000);
+        struct pollfd ready = {.fd = fd, .events = POLLPRI | POLLIN};
+        int polled = poll(&ready, 1, wait);
+        if (polled < 0 && errno == EINTR)
+            continue;
+        if (polled < 0 || (ready.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            ret = polled < 0 ? -errno : -EIO;
+            break;
+        }
+        if (ready.revents & POLLPRI) {
+            struct v4l2_event event = {0};
+            if (ioctl(fd, VIDIOC_DQEVENT, &event) < 0) {
+                if (errno == EINTR || errno == EAGAIN || errno == ENOENT)
+                    continue;
+                ret = -errno;
+                break;
+            }
+            uint32_t sequence = event.u.frame_sync.frame_sequence;
+            uint64_t sof = (uint64_t)event.timestamp.tv_sec * 1000000000U + (uint64_t)event.timestamp.tv_nsec;
+            if (event.type != V4L2_EVENT_FRAME_SYNC || event.id ||
+                (seen_event && event.sequence != event_sequence + 1)) {
+                ret = -EPROTO;
+                break;
+            }
+            seen_event = true;
+            event_sequence = event.sequence;
+            if ((*trace_count && sof <= traces[*trace_count - 1].write_end_ns) ||
+                (target < frames && sequence > target - delay)) {
+                ret = -ETIME;
+                break;
+            }
+            if (target < frames && sequence == target - delay) {
+                if (event.pending) {
+                    ret = -ETIME;
+                    break;
+                }
+                cc_control control = levels[target / 16 % 2];
+                cc_sensor_trace *trace = &traces[(*trace_count)++];
+                *trace = (cc_sensor_trace){.frame_sequence = sequence, .target_sequence = target,
+                    .id = control.id, .sof_ns = sof, .requested = control.value, .write_start_ns = now_ns()};
+                ret = cc_camera_set_controls(camera, &control, 1, NULL);
+                trace->write_end_ns = now_ns();
+                if (!ret)
+                    ret = cc_camera_get_controls(camera, &control, 1, NULL);
+                trace->acknowledged = control.value;
+                trace->error = ret;
+                target += 16;
+                if (ret < 0)
+                    break;
+            }
+        }
+        if (ready.revents & POLLIN) {
+            cc_frame frame;
+            ret = cc_camera_dequeue(camera, &frame, 0);
+            if (ret == -EAGAIN) {
+                ret = 0;
+                continue;
+            }
+            if (ret < 0)
+                break;
+            if (frame.flags & V4L2_BUF_FLAG_ERROR) {
+                ret = -EIO;
+                break;
+            }
+            struct row *row = &rows[(*count)++];
+            *row = (struct row){.sequence = frame.sequence, .timestamp = frame.timestamp_ns, .flags = frame.flags};
+            ret = raw10_luminance(format, &frame, &row->luma);
+            if (!ret && raw_file)
+                ret = write_payload(raw_file, &frame);
+            if (!ret)
+                ret = cc_camera_queue(camera, frame.index);
+        }
+    }
+    int stopped = cc_camera_stop(camera);
+    return ret < 0 ? ret : stopped;
+}
+
 static int disable_auto(cc_camera *camera)
 {
     const uint32_t ids[] = {V4L2_CID_AUTOGAIN, V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_EXPOSURE_AUTO};
@@ -103,10 +235,10 @@ static int metadata(const char *path, const struct row *rows, size_t n, const cc
         const cc_ipa_metadata *m = &r->ipa;
         fprintf(out,
                 "{\"type\":\"frame\",\"sequence\":%u,\"timestamp_ns\":%" PRIu64
-                ",\"flags\":%u,\"luminance\":%.9g,\"exposure_ns\":%" PRIu64
+                ",\"flags\":%u,\"raw_flags\":%u,\"luminance\":%.9g,\"exposure_ns\":%" PRIu64
                 ",\"gain\":%.9g,\"red_gain\":%.9g,\"blue_gain\":%.9g,\"colour_temperature\":%.9g,\"frame_"
                 "duration_ns\":%" PRIu64 ",\"controls\":[",
-                r->sequence, r->timestamp, m->flags, r->luma, m->exposure_ns, m->analogue_gain, m->red_gain,
+                r->sequence, r->timestamp, m->flags, r->flags, r->luma, m->exposure_ns, m->analogue_gain, m->red_gain,
                 m->blue_gain, m->colour_temperature, m->frame_duration_ns);
         for (uint32_t j = 0; j < r->sensor.count; ++j)
             fprintf(out, "%s{\"id\":%u,\"expected\":%" PRId64 "}", j ? "," : "", r->sensor.controls[j].id,
@@ -143,11 +275,18 @@ static int open_fds(void)
         ret = -errno;
     return ret;
 }
-static uint64_t sample(const unsigned char *data, size_t size)
+static uint64_t sample(const unsigned char *data, size_t size, double *mean)
 {
     uint64_t hash = UINT64_C(14695981039346656037);
-    for (size_t i = 0; i < size; i += 1021)
+    uint64_t sum = data[size - 1];
+    size_t count = 1;
+    for (size_t i = 0; i < size; i += 1021) {
         hash = (hash ^ data[i]) * UINT64_C(1099511628211);
+        sum += data[i];
+        ++count;
+    }
+    if (mean)
+        *mean = (double)sum / (double)count;
     return (hash ^ data[size - 1]) * UINT64_C(1099511628211);
 }
 static int sync_read(int fd, uint64_t phase)
@@ -168,7 +307,7 @@ static int check_export(cc_capture *capture, const cc_request *request, enum cc_
     const unsigned char *map = mmap(NULL, plane->length, PROT_READ, MAP_SHARED, fd, 0);
     int ret = map == MAP_FAILED ? -errno : sync_read(fd, DMA_BUF_SYNC_START);
     if (!ret) {
-        uint64_t hash = sample(map + plane->data_offset, plane->bytes_used - plane->data_offset);
+        uint64_t hash = sample(map + plane->data_offset, plane->bytes_used - plane->data_offset, NULL);
         ret = sync_read(fd, DMA_BUF_SYNC_END);
         if (!ret && hash != expected)
             ret = -EIO;
@@ -190,11 +329,12 @@ static int repeat_result(cc_capture *capture, cc_request *request, uint64_t sequ
         return -EPROTO;
     const cc_frame *images[] = {&r->raw, &r->output[0]};
     const enum cc_capture_stream streams[] = {CC_CAPTURE_RAW, CC_CAPTURE_OUTPUT0};
+    double means[2];
     for (size_t i = 0; i < 2; ++i) {
         const cc_plane *p = &images[i]->planes[0];
         if (images[i]->num_planes != 1 || !p->data || p->data_offset >= p->bytes_used || p->bytes_used > p->length)
             return -EPROTO;
-        hashes[i] = sample((const unsigned char *)p->data + p->data_offset, p->bytes_used - p->data_offset);
+        hashes[i] = sample((const unsigned char *)p->data + p->data_offset, p->bytes_used - p->data_offset, &means[i]);
         if (export_images) {
             int ret = check_export(capture, request, streams[i], p, hashes[i]);
             if (ret < 0)
@@ -207,9 +347,10 @@ static int repeat_result(cc_capture *capture, cc_request *request, uint64_t sequ
     return fprintf(log, "{\"type\":\"frame\",\"request\":%" PRIu64 ",\"cookie\":%" PRIu64 ",\"sensor_sequence\":%u,"
                         "\"sensor_cookie\":%" PRIu64 ",\"exposure_ns\":%" PRIu64 ",\"analogue_gain\":%.6g,"
                         "\"raw_ns\":%" PRIu64 ",\"rgb_ns\":%" PRIu64 ",\"raw_sample\":\"%016" PRIx64
-                        "\",\"rgb_sample\":\"%016" PRIx64 "\",\"dma_checked\":%s}\n",
+                        "\",\"rgb_sample\":\"%016" PRIx64 "\",\"raw_sample_mean\":%.6g,\"rgb_sample_mean\":%.6g,"
+                        "\"dma_checked\":%s}\n",
                    sequence, r->cookie, r->raw.sequence, r->sensor.cookie, r->ipa.exposure_ns, r->ipa.analogue_gain,
-                   *timestamp, r->output[0].timestamp_ns, hashes[0], hashes[1],
+                   *timestamp, r->output[0].timestamp_ns, hashes[0], hashes[1], means[0], means[1],
                    export_images ? "true" : "false") < 0 ? -EIO : 0;
 }
 static int repeat_check(cc_capture **graph, uint32_t slots, uint32_t frames, int timeout,
@@ -346,7 +487,7 @@ static void usage(void)
          "  [--diagnostic exposure|gain|vblank --frames 96]\n"
          "OV5647, IMX219, IMX477 and IMX708 on Pi 4/earlier. Uses full-resolution mode.\n"
          "Defaults to standard colour; select NoIR/wide modules explicitly.\n"
-         "Only Pi 4/OV5647 has a physical acceptance target; validation is pending.\n"
+         "See docs/PI4_OV5647.md for the physical validation record.\n"
          "Diagnostics require OV5647, fixed illumination and settings.\n"
          "Run ccamera-capture -l to choose a discovery index or camera ID.");
 }
@@ -583,28 +724,28 @@ int main(int argc, char **argv)
     ret = cc_camera_select_sensor_mode(camera, &mode_request, &selected);
     if (ret < 0)
         goto done;
-    ret = cc_vc4_isp_open(NULL, &isp);
-    if (ret < 0)
-        goto done;
+    if (!diagnostic) {
+        ret = cc_vc4_isp_open(NULL, &isp);
+        if (ret < 0)
+            goto done;
+    }
     cc_capture_devices planned_devices = {.camera = camera, .vc4 = isp};
     const enum cc_stream_role roles[] = {CC_ROLE_RAW, CC_ROLE_STILL_CAPTURE};
     cc_pipeline_configuration pipeline;
-    ret = cc_pipeline_generate_configuration(&planned_devices, roles, 2, &pipeline);
+    ret = cc_pipeline_generate_configuration(&planned_devices, roles, diagnostic ? 1 : 2, &pipeline);
     if (ret < 0)
         goto done;
     pipeline.sensor = selected; /* Require the calibrated full-resolution mode. */
     pipeline.streams[0].sensor_bit_depth = depth;
-    pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24,
-        .width = output_width ? output_width : width, .height = output_height ? output_height : height};
+    if (!diagnostic)
+        pipeline.streams[1].format = (cc_format){.fourcc = V4L2_PIX_FMT_RGB24,
+            .width = output_width ? output_width : width, .height = output_height ? output_height : height};
     pipeline.orientation = orientation;
     ret = cc_pipeline_configure(&planned_devices, &pipeline);
     if (ret < 0)
         goto done;
     raw = pipeline.source_format;
     orientation = pipeline.applied_orientation;
-    ret = cc_vc4_isp_get_configuration(isp, &config);
-    if (ret < 0)
-        goto done;
     fprintf(stderr,"orientation=%u (EXIF), raw_fourcc=0x%08x\n",(unsigned)orientation,raw.fourcc);
     if (raw.width != width || raw.height != height) {
         ret = -EPROTO;
@@ -624,13 +765,51 @@ int main(int argc, char **argv)
     if (ret < 0)
         goto done;
     uint32_t n = 4;
-    ret = cc_vc4_isp_allocate_buffers(isp, &n);
-    if (ret < 0)
-        goto done;
-    n = 4;
+    if (isp) {
+        ret = cc_vc4_isp_get_configuration(isp, &config);
+        if (ret < 0)
+            goto done;
+        ret = cc_vc4_isp_allocate_buffers(isp, &n);
+        if (ret < 0)
+            goto done;
+        n = 4;
+    }
     ret = cc_camera_allocate_buffers(camera, &n);
     if (ret < 0)
         goto done;
+    if (diagnostic) {
+        if (raw.fourcc != V4L2_PIX_FMT_SBGGR10P && raw.fourcc != V4L2_PIX_FMT_SGBRG10P &&
+            raw.fourcc != V4L2_PIX_FMT_SGRBG10P && raw.fourcc != V4L2_PIX_FMT_SRGGB10P) {
+            ret = -ENOTSUP;
+            goto done;
+        }
+        unsigned control = !strcmp(diagnostic, "exposure") ? 0 : !strcmp(diagnostic, "gain") ? 1 : 2;
+        uint32_t exposure_lines;
+        ret = cc_sensor_exposure_lines(model, &timing, 5000000, &exposure_lines);
+        if (ret < 0)
+            goto done;
+        cc_control initial[] = {{.id = V4L2_CID_EXPOSURE, .value = exposure_lines},
+                                {.id = V4L2_CID_ANALOGUE_GAIN, .value = 16},
+                                {.id = V4L2_CID_VBLANK, .value = timing.vblank}};
+        ret = cc_camera_set_controls(camera, initial, 2, NULL);
+        if (ret < 0)
+            goto done;
+        cc_control levels[] = {initial[control], initial[control]};
+        levels[1].value = control == 0 ? exposure_lines * 3 : control == 1 ? 64 : timing.vblank + timing.height / 2;
+        if (raw_path) {
+            raw_file = fopen(raw_path, "wb");
+            if (!raw_file) {
+                ret = -errno;
+                goto done;
+            }
+        }
+        ret = diagnostic_run(camera, &raw, n, levels, delays[control], frames,
+                             now_ns() + (uint64_t)timeout * 1000000, raw_file, rows, &row_count,
+                             traces, &trace_count);
+        if (!ret)
+            fprintf(stderr, "Diagnostic complete; %zu raw frames; profile=%s\n", row_count, profile->calibration_id);
+        goto done;
+    }
     cc_capture_devices devices = {.camera = camera, .vc4 = isp};
     ret = cc_capture_create(&devices, &capture, &n);
     if (ret < 0)
@@ -659,7 +838,7 @@ int main(int argc, char **argv)
         if (ret < 0)
             goto done;
     }
-    if (!diagnostic) {
+    {
         cc_sensor_mode_policy p;
         uint64_t duration;
         ret = cc_sensor_frame_duration(&timing, &duration);
@@ -699,50 +878,6 @@ int main(int argc, char **argv)
             goto done;
         }
         ret = cc_request_set_sensor_controls(request, manual, mn);
-        if (ret < 0)
-            goto done;
-    } else {
-        uint32_t exposure_lines;
-        ret = cc_sensor_exposure_lines(model, &timing, 5000000, &exposure_lines);
-        if (ret < 0)
-            goto done;
-        cc_control initial[] = {{.id = V4L2_CID_EXPOSURE, .value = exposure_lines},
-                                {.id = V4L2_CID_ANALOGUE_GAIN, .value = 16}};
-        /* Immediate writes must not bypass the active delay model. */
-        ret = cc_capture_configure_sensor_delays(capture, NULL, 0);
-        if (ret < 0)
-            goto done;
-        ret = cc_capture_set_controls(capture, initial, 2, NULL);
-        if (ret < 0)
-            goto done;
-        ret = cc_capture_configure_sensor_delays(capture, d, dn);
-        if (ret < 0)
-            goto done;
-        for (uint32_t target = 16; target < frames; target += 16) {
-            cc_control change = {.id = !strcmp(diagnostic, "exposure") ? V4L2_CID_EXPOSURE
-                                       : !strcmp(diagnostic, "gain")   ? V4L2_CID_ANALOGUE_GAIN
-                                                                       : V4L2_CID_VBLANK};
-            bool high = (target / 16) % 2 != 0;
-            change.value = change.id == V4L2_CID_EXPOSURE ? (high ? exposure_lines * 3 : exposure_lines)
-                           : change.id == V4L2_CID_ANALOGUE_GAIN
-                               ? (high ? 64 : 16)
-                               : timing.vblank + (high ? timing.height / 2 : 0);
-            if (target > 120)
-                break; /* Delay planner history is bounded to 128 frames. */
-            ret = cc_capture_schedule_sensor_controls(capture, target, &change, 1, target);
-            if (ret < 0)
-                goto done;
-        }
-        cc_vc4_tuning baseline;
-        ret = cc_vc4_build_tuning(tuning.profile, &geometry, 4500, 1, &baseline);
-        if (!ret)
-            ret = cc_request_set_vc4_tuning(request, &baseline);
-        if (ret < 0)
-            goto done;
-        cc_control wb[] = {{.id = V4L2_CID_RED_BALANCE, .value = 1000},
-                           {.id = V4L2_CID_BLUE_BALANCE, .value = 1000},
-                           {.id = V4L2_CID_DIGITAL_GAIN, .value = 1000}};
-        ret = cc_request_set_isp_controls(request, wb, 3);
         if (ret < 0)
             goto done;
     }
@@ -802,12 +937,12 @@ int main(int argc, char **argv)
                          (CC_IPA_AE_CONVERGED | CC_IPA_AWB_CONVERGED) &&
                      !r->untrusted;
         stable = ready ? stable + 1 : 0;
-        if (raw_file && (diagnostic || stable >= 3)) {
+        if (raw_file && stable >= 3) {
             ret = write_payload(raw_file, &r->raw);
             if (ret < 0)
                 break;
         }
-        if (!diagnostic && stable >= 3) {
+        if (stable >= 3) {
             ret = ppm(output, &r->output[0], &config.output[0]);
             if (ret < 0)
                 break;
@@ -828,10 +963,10 @@ int main(int argc, char **argv)
         ret = cc_capture_release(capture, completed);
         if (ret < 0)
             break;
-        if (saved || (diagnostic && row_count >= frames))
+        if (saved)
             break;
     }
-    if (!ret && !diagnostic && !saved)
+    if (!ret && !saved)
         ret = -ETIMEDOUT;
     if (capture) {
         int stopped = cc_capture_stop(capture);
@@ -839,8 +974,7 @@ int main(int argc, char **argv)
             ret = stopped;
     }
     if (!ret)
-        fprintf(stderr, "%s; %zu frames; profile=%s\n", diagnostic ? "Diagnostic complete" : output,
-                row_count, profile->calibration_id);
+        fprintf(stderr, "%s; %zu frames; profile=%s\n", output, row_count, profile->calibration_id);
 done:
     if (capture) {
         uint64_t lost;

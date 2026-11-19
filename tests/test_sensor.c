@@ -37,6 +37,7 @@ static void test_properties(void)
     double gain = 123;
     CHECK(cc_sensor_gain(lookup("ar0521"), 0, &gain) == -ENOTSUP && gain == 123);
     p = cc_sensor_get_properties(lookup("ov5647")); CHECK(p->features & CC_SENSOR_DRIVER_DEPENDENT_DELAYS);
+    CHECK(p->delays[2].id == V4L2_CID_VBLANK && p->delays[2].frames == 1);
     CHECK(lookup("imx708_wide_noir 0-001a") == lookup("imx708"));
     const char *bad[] = {"unknown", "x-imx219", "imx219bad", "imx219_noir", "imx708_wide_noir2"};
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {

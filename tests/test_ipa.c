@@ -282,6 +282,7 @@ static cc_ipa_configuration planning_configuration(void)
 static void test_duration_planning(void)
 {
     cc_ipa_configuration c=planning_configuration();
+    c.sensor_delays[2].frames=1;
     cc_ipa_reference_tuning t=tuning(); t.flags=CC_IPA_REFERENCE_AE;
     t.min_frame_duration_ns=5000000; t.max_frame_duration_ns=20000000;
     cc_ipa *ipa; OK(create_reference(&t,&ipa));
@@ -309,7 +310,7 @@ static void test_duration_planning(void)
     for (unsigned int i=0;i<4;++i) {
         c=planning_configuration();
         if (i==0) c.sensor_delays[2].flags=0;
-        if (i==1) c.sensor_delays[2].frames=1;
+        if (i==1) c.sensor_delays[2].frames=CC_SENSOR_MAX_DELAY+1;
         if (i==2) c.timing_limits.pixel_rate=0;
         if (i==3) c.timing_limits.exposure_step=2;
         OK(create_reference(&t,&ipa)); CHECK(cc_ipa_configure(ipa,&c)<0); cc_ipa_destroy(ipa);

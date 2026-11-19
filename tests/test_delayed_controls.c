@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #include "delayed_controls.h"
 #include <errno.h>
+#include <linux/videodev2.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -181,9 +182,61 @@ static void test_next_target(void)
     OK(cc_delayed_get(d, 4, &v)); CHECK(v.cookie == 10); /* Rejections scheduled nothing. */
     cc_delayed_destroy(d);
 }
+static void test_short_blanking_delay(void)
+{
+    const cc_sensor_control_delay params[] = {
+        {V4L2_CID_EXPOSURE, 2, 0}, {V4L2_CID_ANALOGUE_GAIN, 2, 0},
+        {V4L2_CID_VBLANK, 1, CC_SENSOR_CONTROL_PRIORITY},
+    };
+    const cc_control initial[] = {
+        {.id=V4L2_CID_EXPOSURE,.value=60}, {.id=V4L2_CID_ANALOGUE_GAIN,.value=16},
+        {.id=V4L2_CID_VBLANK,.value=24},
+    };
+    cc_control longer[] = {
+        {.id=V4L2_CID_EXPOSURE,.value=3200}, {.id=V4L2_CID_ANALOGUE_GAIN,.value=32},
+        {.id=V4L2_CID_VBLANK,.value=1300},
+    };
+    struct cc_delayed_controls *d;
+    OK(cc_delayed_create(params, initial, 3, &d));
+    uint32_t target;
+    OK(cc_delayed_schedule_next(d, longer, 3, 10, &target)); CHECK(target == 2);
+    struct cc_delayed_batch batch;
+    OK(cc_delayed_prepare(d, 0, &batch)); CHECK(batch.count == 3);
+    for (size_t i = 0; i < batch.count; ++i) {
+        bool blanking = batch.controls[i].id == V4L2_CID_VBLANK;
+        CHECK(batch.priority[i] == blanking && batch.targets[i] == (blanking ? 1U : 2U));
+        if (blanking) batch.controls[i].value = 1299;
+    }
+    OK(cc_delayed_commit(d, &batch));
+    advance(d, 1);
+    cc_sensor_controls values;
+    OK(cc_delayed_get(d, 1, &values));
+    CHECK(values.cookie == 0 && values.controls[0].value == 60 && values.controls[2].value == 1299);
+    advance(d, 2);
+    OK(cc_delayed_get(d, 2, &values));
+    CHECK(values.cookie == 10 && values.controls[0].value == 3200 && values.controls[1].value == 32 &&
+          values.controls[2].value == 1299);
+
+    OK(cc_delayed_schedule_next(d, initial, 3, 20, &target)); CHECK(target == 5);
+    OK(cc_delayed_prepare(d, 3, &batch)); CHECK(batch.count == 2);
+    for (size_t i = 0; i < batch.count; ++i)
+        CHECK(!batch.priority[i] && batch.controls[i].id != V4L2_CID_VBLANK && batch.targets[i] == 5);
+    OK(cc_delayed_commit(d, &batch));
+    OK(cc_delayed_prepare(d, 4, &batch));
+    CHECK(batch.count == 1 && batch.controls[0].id == V4L2_CID_VBLANK && batch.priority[0] && batch.targets[0] == 5);
+    OK(cc_delayed_commit(d, &batch));
+    OK(cc_delayed_get(d, 4, &values));
+    CHECK(values.cookie == 10 && values.controls[0].value == 3200 && values.controls[2].value == 1299);
+    advance(d, 5);
+    OK(cc_delayed_get(d, 5, &values));
+    CHECK(values.cookie == 20 && values.controls[0].value == 60 && values.controls[1].value == 16 &&
+          values.controls[2].value == 24);
+    cc_delayed_destroy(d);
+}
 int main(void)
 {
     test_stagger(); test_gaps_and_wrap(); test_model(); test_full_mask(); test_next_target();
+    test_short_blanking_delay();
     puts("Delayed-control stagger, acknowledgements, contexts, atomic validation, history and wrap passed");
     return 0;
 }

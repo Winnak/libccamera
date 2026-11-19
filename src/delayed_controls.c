@@ -7,13 +7,14 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <linux/videodev2.h>
 #include <stdlib.h>
 #include <string.h>
 
 struct planned {
     uint64_t frame, cookie;
     uint32_t mask, written;
-    bool valid;
+    bool valid, update_cookie;
     int64_t values[CC_SENSOR_MAX_CONTROLS];
 };
 struct historic {
@@ -85,7 +86,7 @@ int cc_delayed_schedule(struct cc_delayed_controls *d, uint32_t target, const cc
     }
     if (!p->valid) *p = (struct planned) { .valid = true, .frame = frame };
     for (size_t i = 0; i < count; ++i) p->values[indices[i]] = controls[i].value;
-    p->mask |= mask; p->cookie = cookie;
+    p->mask |= mask; p->cookie = cookie; p->update_cookie = true;
     return 0;
 }
 
@@ -93,18 +94,44 @@ int cc_delayed_schedule_next(struct cc_delayed_controls *d, const cc_control *co
                              size_t count, uint64_t cookie, uint32_t *target)
 {
     if (!d || !target || (count && !controls) || count > d->count) return -EINVAL;
-    uint32_t delay = 0;
+    uint32_t delay = 0, exposure_delay = 0, blanking_delay = 0;
+    const cc_control *blanking = NULL;
+    size_t blanking_index = 0;
     for (size_t i = 0; i < count; ++i) {
         size_t n = 0;
         while (n < d->count && d->params[n].id != controls[i].id) ++n;
         if (n == d->count) return -ENOENT;
-        if (d->params[n].frames > delay) delay = d->params[n].frames;
+        const cc_sensor_control_delay *param = &d->params[n];
+        if (param->frames > delay) delay = param->frames;
+        if (param->id == V4L2_CID_EXPOSURE) exposure_delay = param->frames;
+        if (param->id == V4L2_CID_VBLANK && (param->flags & CC_SENSOR_CONTROL_PRIORITY)) {
+            blanking = &controls[i];
+            blanking_index = n;
+            blanking_delay = param->frames;
+        }
     }
     if (d->next >= UINT64_MAX - delay) return -ERANGE;
-    uint32_t frame = (uint32_t)(d->next + delay);
-    int ret = cc_delayed_schedule(d, frame, controls, count, cookie);
-    if (!ret) *target = frame;
-    return ret;
+    uint64_t frame = d->next + delay;
+    struct planned *plan = &d->plans[frame % CC_SENSOR_CONTROL_HISTORY];
+    const struct planned saved = *plan;
+    int ret = cc_delayed_schedule(d, (uint32_t)frame, controls, count, cookie);
+    if (ret < 0) return ret;
+    if (blanking && blanking_delay < exposure_delay && blanking->value > d->effective[blanking_index]) {
+        /* Grow the driver's exposure range before writing shutter. Record the
+         * earlier blanking effect without advancing the request's context. */
+        uint64_t earlier_frame = frame - (exposure_delay - blanking_delay);
+        struct planned *earlier = &d->plans[earlier_frame % CC_SENSOR_CONTROL_HISTORY];
+        bool update_cookie = earlier->valid && earlier->update_cookie;
+        ret = cc_delayed_schedule(d, (uint32_t)earlier_frame, blanking, 1, earlier->cookie);
+        if (ret < 0) {
+            *plan = saved;
+            return ret;
+        }
+        earlier->update_cookie = update_cookie;
+        plan->mask &= ~(UINT32_C(1) << blanking_index);
+    }
+    *target = (uint32_t)frame;
+    return 0;
 }
 
 int cc_delayed_prepare(struct cc_delayed_controls *d, uint32_t sequence, struct cc_delayed_batch *out)
@@ -142,7 +169,8 @@ static int effect(struct cc_delayed_controls *d, uint64_t frame)
     if (p->mask != p->written) return -ESTALE;
     for (size_t i = 0; i < d->count; ++i)
         if (p->mask & (UINT32_C(1) << i)) d->effective[i] = p->values[i];
-    d->cookie = p->cookie; p->valid = false;
+    if (p->update_cookie) d->cookie = p->cookie;
+    p->valid = false;
     return 0;
 }
 int cc_delayed_commit(struct cc_delayed_controls *d, const struct cc_delayed_batch *b)

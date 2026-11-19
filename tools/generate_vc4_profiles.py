@@ -145,6 +145,7 @@ def generate(pipeline="vc4"):
             "transverse_pos": awb.get("transverse_pos", 0),
             "transverse_neg": awb.get("transverse_neg", 0),
             "base_ev": agc.get("base_ev", 1), "speed": agc.get("speed", 0.2),
+            "ae_startup_frames": agc.get("startup_frames", 10),
             "constraint_target": constraint["y_target"][1],
             "lux_shutter": a["rpi.lux"]["reference_shutter_speed"] * 1000,
             "lux_gain": a["rpi.lux"]["reference_gain"], "lux_y": a["rpi.lux"]["reference_Y"],

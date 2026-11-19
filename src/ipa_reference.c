@@ -150,7 +150,7 @@ static int configure_planning(struct reference *r)
         }
         if (info->id==V4L2_CID_HBLANK && !control_range(info)) hblank=delay;
     }
-    if (!exposure || !vblank || !(vblank->flags&CC_SENSOR_CONTROL_PRIORITY) || vblank->frames<exposure->frames)
+    if (!exposure || !vblank || !(vblank->flags&CC_SENSOR_CONTROL_PRIORITY))
         return -ENOTSUP;
     r->variable_hblank=hblank && hblank->frames>=exposure->frames;
     cc_sensor_exposure_plan plan;

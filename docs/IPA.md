@@ -25,9 +25,10 @@ AE requires a supported sensor gain/exposure model and configured exposure/gain
 delays. It respects native control steps, live driver timing, frame-length margins
 and an optional exposure ceiling. By default it keeps the current frame length.
 Setting both `min_frame_duration_ns` and `max_frame_duration_ns` opts into native
-exposure/blanking planning. This requires managed priority VBLANK with a delay
-at least as long as EXPOSURE. Managed HBLANK can vary when its delay is sufficient;
-otherwise it stays at its live value. This mode requests `CC_IPA_CAP_SENSOR_TIMING`
+exposure/blanking planning. This requires managed priority VBLANK. The capture
+scheduler advances a VBLANK increase when its configured delay is shorter than
+EXPOSURE's. Managed HBLANK can vary when its delay covers the exposure delay.
+This mode requests `CC_IPA_CAP_SENSOR_TIMING`
 and receives live timing limits before each prepare call. The driver still checks
 and acknowledges every write. Caller shutter/blanking overrides take precedence;
 impossible manual combinations fail before submission. AWB programs

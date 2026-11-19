@@ -51,9 +51,9 @@ same frame-start scheduler. Unknown models return `-ENOENT`; known models with
 missing delay data return `-ENODATA`. There is no guessed fallback. For example,
 IMX219 has a one-frame gain delay, while IMX477 has a three-frame blanking delay.
 Explicit `cc_capture_configure_sensor_delays` overrides remain available for a
-particular driver/mode. OV5647 defaults retain the reference's driver-dependent
-qualification in `CC_SENSOR_DRIVER_DEPENDENT_DELAYS`; they are not a universal
-mainline-driver guarantee.
+particular driver/mode. OV5647 defaults use the two-frame exposure/gain and
+one-frame VBLANK delays measured on a Pi 4B at full resolution. The profile
+retains `CC_SENSOR_DRIVER_DEPENDENT_DELAYS` for other drivers and modes.
 
 The gain helpers convert between native analogue-gain codes and linear gain.
 They support reciprocal, linear and logarithmic register models without libm.
@@ -121,8 +121,12 @@ After configuring delays, attach native scalar values to individual requests
 with `cc_request_set_sensor_controls`. The graph selects the next reachable
 effective sensor frame, staggers the writes and internally recycles earlier
 source frames. Successful results and downstream processing receive only frames
-at or after the settings become effective. This works with camera and CFE
-sources; the CFE image/statistics/configuration buffers retire together.
+at or after the settings become effective. When priority VBLANK has a shorter
+delay than exposure, a request that increases VBLANK and sets exposure writes
+the increase at the same frame start, before exposure. The earlier VBLANK
+effect retains the previous request cookie until the planned target. Camera and
+CFE sources support these requests. The CFE image, statistics and configuration
+buffers retire together.
 The current one-job source controllers can require settling frames for each
 changed request; look-ahead scheduling remains future work.
 

@@ -634,7 +634,8 @@ static int sensor_events(cc_capture *c)
     for (size_t n = 0;; ++n) {
         struct v4l2_event event = {0};
         int ret = cc_ioctl(&c->io, source_fd(c), VIDIOC_DQEVENT, &event);
-        if (ret == -EAGAIN) break;
+        /* The kernel can report an empty nonblocking event queue as ENOENT. */
+        if (ret == -EAGAIN || ret == -ENOENT) break;
         if (ret < 0) return ret;
         if (event.type != V4L2_EVENT_FRAME_SYNC || event.id) return -EPROTO;
         if (n >= CC_SENSOR_CONTROL_HISTORY ||
@@ -681,7 +682,7 @@ static int sensor_events(cc_capture *c)
         struct v4l2_event event = {0};
         ret = cc_ioctl(&c->io, source_fd(c), VIDIOC_DQEVENT, &event);
         if (!ret) return -ETIME;
-        if (ret != -EAGAIN) return ret;
+        if (ret != -EAGAIN && ret != -ENOENT) return ret;
     }
     return cc_delayed_commit(c->delayed, &b);
 }

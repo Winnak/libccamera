@@ -25,6 +25,7 @@ struct vc4_controller {
     bool pisp;
     cc_control_info gain;
     double exposure_product, red, blue, temperature, lux;
+    uint16_t ae_startup_remaining;
     double next_red, next_blue, next_temperature;
     cc_photo_capabilities capabilities;
     cc_af *af;
@@ -179,7 +180,7 @@ static int configure(void *context, const cc_ipa_configuration *c)
         if (c->sensor_delays[i].id == V4L2_CID_VBLANK)
             vd = &c->sensor_delays[i];
     }
-    if (!ed || !vd || vd->frames < ed->frames || (ed->flags & CC_SENSOR_CONTROL_PRIORITY) ||
+    if (!ed || !vd || (ed->flags & CC_SENSOR_CONTROL_PRIORITY) ||
         !(vd->flags & CC_SENSOR_CONTROL_PRIORITY))
         return -ENOTSUP;
     uint64_t minimum_ns, maximum_ns;
@@ -214,6 +215,7 @@ static int configure(void *context, const cc_ipa_configuration *c)
     if (ret < 0)
         return ret;
     v->exposure_product = (double)ns * initial_gain;
+    v->ae_startup_remaining = p->ae_startup_frames;
     v->temperature = v->next_temperature = 4500;
     double r = 1, b = 1;
     if (p->bayes)
@@ -434,7 +436,9 @@ static int prepare(void *context, const cc_ipa_request *request, cc_ipa_settings
 }
 static int region_valid(const struct bcm2835_isp_stats_region *z)
 {
-    uint64_t limit = (uint64_t)z->counted * 8191;
+    /* VC4 AGC sums can average above the nominal 13-bit metering scale.
+     * Metering still uses that scale and clamps the resulting luminance. */
+    uint64_t limit = (uint64_t)z->counted * UINT16_MAX;
     return z->r_sum <= limit && z->g_sum <= limit && z->b_sum <= limit;
 }
 struct colour_zone { double r, g, b; };
@@ -742,11 +746,19 @@ static int process(void *context, const cc_ipa_frame *frame, cc_ipa_metadata *m)
         bool limited=applied && !(manual_exposure && manual_gain) &&
             ((ratio>1.05 && v->exposure_product>(double)ns*gain*1.05) ||
              (ratio<0.95 && v->exposure_product<(double)ns*gain*0.95));
-        double proposed=v->exposure_product+(absolute(ratio-1)<0.025 ? 0:
-            (double)ns*gain*p->speed*(clamp(ratio,0.5,2)-1));
         double maximum=p->shutter[p->num_exposure-1]*1000*p->gain[p->num_exposure-1];
-        if (!(manual_exposure && manual_gain))
+        if (!(manual_exposure && manual_gain)) {
+            /* Use fast feedback on the first trusted automatic results, as in
+             * the reference AGC, then resume the profile's steady-state speed. */
+            double speed=p->speed;
+            if (v->ae_startup_remaining) {
+                speed=1;
+                --v->ae_startup_remaining;
+            }
+            double proposed=v->exposure_product+(absolute(ratio-1)<0.025 ? 0:
+                (double)ns*gain*speed*(clamp(ratio,0.5,2)-1));
             v->exposure_product=clamp(proposed,p->shutter[0]*1000*p->gain[0],maximum);
+        }
         m->luminance=luma;
         if (applied && ((manual_exposure && manual_gain) || absolute(ratio-1)<0.05)) m->flags|=CC_IPA_AE_CONVERGED;
         if (limited || v->exposure_product>=maximum || (gain>=v->capabilities.automatic_gain.maximum && ratio>1.05)) {

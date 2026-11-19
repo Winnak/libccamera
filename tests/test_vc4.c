@@ -914,6 +914,15 @@ static void format_ioctl(struct fake *f, int node, struct v4l2_format *v, bool s
     p->sizeimage = format->planes[0].size;
     p->field = format->field;
     p->colorspace = format->colorspace;
+    if (f->unicam && node < 3) {
+        p->priv = V4L2_PIX_FMT_PRIV_MAGIC;
+        if (set) {
+            bool full_range = p->colorspace == V4L2_COLORSPACE_SRGB || p->colorspace == V4L2_COLORSPACE_RAW;
+            p->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(p->colorspace);
+            p->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(full_range, p->colorspace, p->ycbcr_enc);
+            p->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(p->colorspace);
+        }
+    }
 }
 
 static void process(struct fake *f)
@@ -1031,7 +1040,7 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
     if (req == VIDIOC_SUBSCRIBE_EVENT || req == VIDIOC_UNSUBSCRIBE_EVENT || req == VIDIOC_DQEVENT) {
         CHECK((node == 4 && (f->sensor_support || f->cfe)) || (f->unicam && node==7));
         if (req == VIDIOC_DQEVENT) {
-            if (!f->event_pending) return -EAGAIN;
+            if (!f->event_pending) return f->unicam ? -ENOENT : -EAGAIN;
             struct v4l2_event *event = arg;
             *event = (struct v4l2_event) {.type=V4L2_EVENT_FRAME_SYNC,.sequence=f->event_serial++};
             event->u.frame_sync.frame_sequence = f->event_frame;
@@ -1047,6 +1056,10 @@ static int ioctl_fd(void *ctx, int fd, unsigned long req, void *arg)
         caps->capabilities = V4L2_CAP_DEVICE_CAPS;
         caps->device_caps = V4L2_CAP_STREAMING | (node == 0 ? V4L2_CAP_VIDEO_OUTPUT :
             node == 3 ? V4L2_CAP_META_CAPTURE : V4L2_CAP_VIDEO_CAPTURE);
+        if (!f->pisp && node < 4) {
+            strcpy((char *)caps->driver, "bcm2835-isp");
+            if (f->unicam) caps->device_caps |= V4L2_CAP_EXT_PIX_FORMAT;
+        }
         if (f->pisp && (node < 4 || node >= 12))
             caps->device_caps = V4L2_CAP_STREAMING | (node == 2 ? V4L2_CAP_META_OUTPUT :
                 node == 0 || node == 12 || node == 14 ? V4L2_CAP_VIDEO_OUTPUT_MPLANE : V4L2_CAP_VIDEO_CAPTURE_MPLANE);
@@ -3864,9 +3877,10 @@ static void test_processed_roles(bool pisp)
 
 static int still_nodes(void *ctx, char ***out, size_t *count)
 {
-    (void)ctx;
-    const char *paths[] = {"/dev/video7", "/dev/media2", "/dev/media1", "/dev/media0"};
-    *count = sizeof(paths) / sizeof(paths[0]);
+    const struct fake *f = ctx;
+    const char *paths[] = {"/dev/video7", "/dev/media2", "/dev/media1", "/dev/media0",
+                           "/dev/video1", "/dev/video2"};
+    *count = sizeof(paths) / sizeof(paths[0]) - (f->pisp ? 2U : 0U);
     *out = calloc(*count, sizeof(**out));
     CHECK(*out);
     for (size_t i = 0; i < *count; ++i) {
@@ -3896,6 +3910,14 @@ static void test_still_pi(bool pisp)
         .pipeline = pisp ? CC_PIPELINE_RPI_CFE : CC_PIPELINE_RPI_UNICAM,
         .media_path = "/dev/media1", .video_path = "/dev/video7", .sensor_entity = 1,
     };
+    if (!pisp) {
+        cc_camera_info *list;
+        size_t count;
+        OK(cc_enumerate_io(&io, &list, &count));
+        CHECK(count == 1 && list[0].pipeline == CC_PIPELINE_RPI_UNICAM);
+        cc_camera_list_free(list);
+        finished(&f);
+    }
     cc_still_configuration config = {.buffer_count = 123};
     cc_capture *capture = NULL;
     const cc_still_options wrong = {.profile = CC_VC4_PROFILE_IMX477};

@@ -35,6 +35,7 @@ struct cc_vc4_profile_data {
     const double *shutter, *gain, *target, *weights;
     size_t num_exposure, num_target;
     double base_ev, speed, constraint_target;
+    uint16_t ae_startup_frames;
     double lux_shutter, lux_gain, lux_y, lux_reference;
     const double *metering[3]; /* centre, spot, matrix, in native region order. */
     double wb_modes[7][2]; /* auto, incandescent, tungsten, fluorescent, indoor, daylight, cloudy. */

@@ -69,8 +69,10 @@ remain private to that execution. Syntax validation is also available as
 | Frame durations | Minimum/maximum nanoseconds, both positive or both zero | Both zero select the physical mode bounds; blanking/exposure use the sensor-specific planner |
 
 Manual times and gains quantize down to representable sensor lines/codes and
-live steps. VBLANK is planned and written before exposure, with the configured
-sensor delays. A fixed frame ceiling can shorten a manual shutter and is reported
+live steps. Request scheduling uses the configured sensor delays. With a shorter
+VBLANK delay, a frame-length increase is written before shutter on the same frame
+start. A decrease is written after the shorter shutter, at the configured delay.
+A fixed frame ceiling can shorten a manual shutter and is reported
 as a limit; frame timing follows the planner's documented native rounding.
 Nonintersecting frame bounds or manual values outside live capabilities return
 `-ERANGE`. Unknown control flags return `-ENOTSUP`; malformed values/enums,

@@ -6,8 +6,8 @@ and sharpening. It also selects the profile's normal exposure curve, luminance
 target, highlight constraint, lux calibration and white-balance policy. Tables
 are compiled into the library; no runtime JSON reader, Python or libm is needed.
 
-These are **software-tested profiles**. Physical image quality remains unverified.
-The required hardware acceptance target is Pi 4 with standard-colour OV5647.
+These are **software-tested profiles**. The Pi 4 with standard-colour OV5647
+has a [physical image-quality and timing record](PI4_OV5647.md#hardware-test-results).
 Pi 5 has a separate calibrated CFE/PiSP single-exposure path described below.
 Neither controller accepts the other ISP pipeline. Both implement the
 [common photographic controls and metadata contract](PHOTO_CONTROLS.md), including
@@ -21,7 +21,7 @@ An unknown photo sensor fails with `-ENOTSUP` rather than borrowing a calibratio
 
 | Profile name | Module/lens | Automatic white balance | Limitations |
 | --- | --- | --- | --- |
-| `ov5647` | Standard Camera Module v1.3 | Calibrated Bayesian | Pi 4 hardware acceptance pending |
+| `ov5647` | Standard Camera Module v1.3 | Calibrated Bayesian | Pi 4 daylight, warm indoor, covered-lens and neutral-surface comparisons collected |
 | `ov5647_noir` | NoIR v1.3 | Trimmed grey-world | No physical validation; IR illumination changes colour response |
 | `imx219` | Standard Camera Module v2 | Calibrated Bayesian | No physical validation |
 | `imx219_noir` | NoIR v2 | Trimmed grey-world | No physical validation; illumination-dependent colour |
@@ -107,7 +107,8 @@ focus the physical lens and assess its shading before relying on the photograph.
 
 ## Calibration and algorithm limits
 
-Factory lens shading uses the reference's chroma tables and luminance strength.
+Factory lens shading combines the reference's chroma gain multipliers and
+luminance correction.
 Scene-adaptive ALSC remains outside this implementation. Noise and sharpening
 use the reference's estimated binning factor from live crop and output sizes,
 with at most twofold binning per axis. Individual modes have no physically

@@ -66,9 +66,11 @@ static const struct cc_sensor_model models[] = {
         .cell_width_nm=2000, .cell_height_nm=2000, .frame_integration_margin=0}, .gain_family=NO_GAIN, .parameter=0},
     { .properties = {.model="ov5640", .features=CC_SENSOR_CELL_SIZE,
         .cell_width_nm=1400, .cell_height_nm=1400, .frame_integration_margin=0}, .gain_family=NO_GAIN, .parameter=0},
+    /* Exposure, gain and VBLANK measured with full-resolution Unicam capture.
+     * Keep HBLANK provisional and allow overrides for other drivers and modes. */
     { .properties = {.model="ov5647", .features=CC_SENSOR_CELL_SIZE | CC_SENSOR_DELAYS | CC_SENSOR_GAIN | CC_SENSOR_EXPOSURE | CC_SENSOR_DRIVER_DEPENDENT_DELAYS,
         .cell_width_nm=1400, .cell_height_nm=1400, .frame_integration_margin=4,
-        .num_delays=4, .delays={{V4L2_CID_EXPOSURE,2,0},{V4L2_CID_ANALOGUE_GAIN,2,0},{V4L2_CID_VBLANK,2,CC_SENSOR_CONTROL_PRIORITY},{V4L2_CID_HBLANK,2,0}}}, .gain_family=LINEAR, .parameter=16},
+        .num_delays=4, .delays={{V4L2_CID_EXPOSURE,2,0},{V4L2_CID_ANALOGUE_GAIN,2,0},{V4L2_CID_VBLANK,1,CC_SENSOR_CONTROL_PRIORITY},{V4L2_CID_HBLANK,2,0}}}, .gain_family=LINEAR, .parameter=16},
     { .properties = {.model="ov5670", .features=CC_SENSOR_CELL_SIZE,
         .cell_width_nm=1120, .cell_height_nm=1120, .frame_integration_margin=0}, .gain_family=NO_GAIN, .parameter=0},
     { .properties = {.model="ov5675", .features=CC_SENSOR_CELL_SIZE,

@@ -110,7 +110,7 @@ int cc_camera_try_orientation(cc_camera *camera, enum cc_orientation *orientatio
     if (!orientation || !transform || !valid_orientation(*orientation)) return -EINVAL;
     struct orientation_info info;
     int ret=orientation_info(camera,&info);
-    if (ret<0) return ret;
+    if (ret) return ret;
     enum cc_orientation o=*orientation;
     enum cc_transform t;
     ret=select_orientation(&info,&o,&t);
@@ -124,7 +124,7 @@ int cc_camera_get_orientation(cc_camera *camera, enum cc_orientation *out)
     if (!out) return -EINVAL;
     struct orientation_info info;
     int ret=orientation_info(camera,&info);
-    if (ret<0) return ret;
+    if (ret) return ret;
     cc_control controls[2];
     size_t count=0;
     for (size_t i=0; i<2; ++i) if (info.present[i]) {
@@ -150,7 +150,7 @@ int cc_camera_predict_orientation(cc_camera *camera, enum cc_orientation *orient
     if (!orientation || !delta || !valid_orientation(*orientation)) return -EINVAL;
     struct orientation_info info;
     int ret=orientation_info(camera,&info);
-    if (ret<0) return ret;
+    if (ret) return ret;
     enum cc_orientation o=*orientation; enum cc_transform target;
     ret=select_orientation(&info,&o,&target);
     if (ret<0) return ret;
@@ -180,7 +180,7 @@ int cc_camera_apply_orientation(cc_camera *camera, enum cc_orientation *orientat
     if (!orientation || !valid_orientation(*orientation)) return -EINVAL;
     struct orientation_info info;
     int ret=orientation_info(camera,&info);
-    if (ret<0) return ret;
+    if (ret) return ret;
     enum cc_orientation o=*orientation;
     enum cc_transform transform;
     ret=select_orientation(&info,&o,&transform);
